@@ -1,0 +1,5 @@
+jsgo
+*.exe
+test262/
+vendor/
+.DS_Store
