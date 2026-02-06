@@ -41,6 +41,45 @@ func (e *jsError) Error() string {
 	return "undefined"
 }
 
+// makeErrorObject creates a proper JS Error object (TypeError, ReferenceError, etc.)
+// that works with instanceof. It looks up the constructor from the environment to get
+// the right prototype chain. Falls back to a simple object if the constructor isn't available.
+func makeErrorObject(errorType string, message string, env *runtime.Environment) *runtime.Value {
+	ctorVal, err := env.Get(errorType)
+	if err == nil && ctorVal.Type == runtime.TypeObject && ctorVal.Object != nil {
+		protoProp := ctorVal.Object.Get("prototype")
+		if protoProp.Type == runtime.TypeObject && protoProp.Object != nil {
+			obj := &runtime.Object{
+				OType:      runtime.ObjTypeError,
+				Properties: make(map[string]*runtime.Property),
+				Prototype:  protoProp.Object,
+			}
+			obj.Set("name", runtime.NewString(errorType))
+			obj.Set("message", runtime.NewString(message))
+			obj.Set("stack", runtime.NewString(fmt.Sprintf("%s: %s", errorType, message)))
+			return runtime.NewObject(obj)
+		}
+	}
+	// Fallback: create a simple error object without prototype chain
+	obj := runtime.NewErrorObject(nil, message)
+	obj.Set("name", runtime.NewString(errorType))
+	return runtime.NewObject(obj)
+}
+
+// errorFromGoError converts a Go error (from environment.Get/Set) into a proper JS Error object.
+// It parses the error type prefix (e.g. "ReferenceError: ...") and creates the right error type.
+func errorFromGoError(goErr error, env *runtime.Environment) *runtime.Value {
+	msg := goErr.Error()
+	errorTypes := []string{"TypeError", "ReferenceError", "SyntaxError", "RangeError", "URIError", "EvalError"}
+	for _, et := range errorTypes {
+		prefix := et + ": "
+		if strings.HasPrefix(msg, prefix) {
+			return makeErrorObject(et, strings.TrimPrefix(msg, prefix), env)
+		}
+	}
+	return makeErrorObject("Error", msg, env)
+}
+
 // Interpreter evaluates an AST using tree-walking.
 type Interpreter struct {
 	global  *runtime.Environment
@@ -81,6 +120,29 @@ func (interp *Interpreter) Eval(source string) (*runtime.Value, error) {
 		env.Declare(name, "var", runtime.NewObject(fnObj))
 	}
 
+	// register eval — tagged via Internal so evalCall can detect direct eval
+	evalFnObj := runtime.NewFunctionObject(nil, func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+		// indirect eval: evaluate in global scope
+		if len(args) == 0 {
+			return runtime.Undefined, nil
+		}
+		if args[0].Type != runtime.TypeString {
+			return args[0], nil
+		}
+		result, sig := interp.evalCodeInEnv(args[0].Str, env)
+		if sig.typ == sigThrow {
+			return nil, &jsError{value: sig.value}
+		}
+		return result, nil
+	})
+	evalFnObj.Internal = map[string]interface{}{"isBuiltinEval": true}
+	evalFnObj.Set("length", runtime.NewNumber(1))
+	env.Declare("eval", "var", runtime.NewObject(evalFnObj))
+
+	// register Function constructor
+	funcCtor := interp.makeFunctionConstructor(env)
+	env.Declare("Function", "var", funcCtor)
+
 	// hoist var declarations and function declarations
 	interp.hoist(program.Statements, env)
 
@@ -104,25 +166,9 @@ func (interp *Interpreter) Eval(source string) (*runtime.Value, error) {
 	return result, nil
 }
 
-// hoist performs var and function hoisting.
+// hoist performs var and function hoisting (delegates to hoistComprehensive in hoisting.go).
 func (interp *Interpreter) hoist(stmts []ast.Statement, env *runtime.Environment) {
-	for _, stmt := range stmts {
-		switch s := stmt.(type) {
-		case *ast.FunctionDeclaration:
-			fnVal := interp.createFunction(s.Name, s.Params, s.Defaults, s.Rest, s.Body, env, false)
-			env.Declare(s.Name.Value, "function", fnVal)
-		case *ast.VariableDeclaration:
-			if s.Kind == "var" {
-				for _, decl := range s.Declarations {
-					names := interp.extractBindingNames(decl.Name)
-					for _, name := range names {
-						funcScope := env.GetFunctionScope()
-						funcScope.SetInCurrentScope(name, runtime.Undefined)
-					}
-				}
-			}
-		}
-	}
+	interp.hoistComprehensive(stmts, env)
 }
 
 func (interp *Interpreter) extractBindingNames(node ast.Expression) []string {
@@ -248,12 +294,12 @@ func (interp *Interpreter) bindPattern(pattern ast.Expression, val *runtime.Valu
 			funcScope.SetInCurrentScope(p.Value, val)
 		} else {
 			if err := env.Declare(p.Value, kind, val); err != nil {
-				return signal{typ: sigThrow, value: runtime.NewString(err.Error())}
+				return signal{typ: sigThrow, value: errorFromGoError(err, env)}
 			}
 		}
 	case *ast.ObjectPattern:
 		if val == nil || val.Type == runtime.TypeUndefined || val.Type == runtime.TypeNull {
-			return signal{typ: sigThrow, value: runtime.NewString("TypeError: Cannot destructure " + val.ToString())}
+			return signal{typ: sigThrow, value: makeErrorObject("TypeError", "Cannot destructure "+val.ToString(), env)}
 		}
 		if val.Type != runtime.TypeObject || val.Object == nil {
 			return signal{}
@@ -747,7 +793,7 @@ func (interp *Interpreter) execClassDecl(s *ast.ClassDeclaration, env *runtime.E
 		return nil, sig
 	}
 	if err := env.Declare(s.Name.Value, "let", classVal); err != nil {
-		return nil, signal{typ: sigThrow, value: runtime.NewString(err.Error())}
+		return nil, signal{typ: sigThrow, value: errorFromGoError(err, env)}
 	}
 	return nil, signal{}
 }
@@ -963,7 +1009,7 @@ func (interp *Interpreter) evalIdentifier(e *ast.Identifier, env *runtime.Enviro
 	}
 	val, err := env.Get(e.Value)
 	if err != nil {
-		return nil, signal{typ: sigThrow, value: runtime.NewString(err.Error())}
+		return nil, signal{typ: sigThrow, value: errorFromGoError(err, env)}
 	}
 	return val, signal{}
 }
@@ -1105,7 +1151,7 @@ func (interp *Interpreter) createFunction(name *ast.Identifier, params []ast.Exp
 	}
 
 	fnObj := runtime.NewFunctionObject(nil, callable)
-	fnObj.Set("prototype", runtime.NewObject(runtime.NewOrdinaryObject(nil)))
+	fnObj.Set("prototype", runtime.NewObject(runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)))
 	if fnName != "" {
 		fnObj.Set("name", runtime.NewString(fnName))
 	}
@@ -1597,7 +1643,7 @@ func (interp *Interpreter) assignToExpression(expr ast.Expression, val *runtime.
 		if err != nil {
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "TypeError") {
-				return signal{typ: sigThrow, value: runtime.NewString(errMsg)}
+				return signal{typ: sigThrow, value: errorFromGoError(err, env)}
 			}
 			// might be undeclared in global scope; set in function scope
 			funcScope := env.GetFunctionScope()
@@ -1655,6 +1701,19 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 		return interp.evalSuperCall(e, env)
 	}
 
+	// Handle direct eval() calls — eval needs access to the calling scope
+	if ident, ok := e.Callee.(*ast.Identifier); ok && ident.Value == "eval" {
+		val, err := env.Get("eval")
+		if err == nil && val.Type == runtime.TypeObject && val.Object != nil &&
+			val.Object.Internal != nil && val.Object.Internal["isBuiltinEval"] != nil {
+			args, argSig := interp.evalArguments(e.Arguments, env)
+			if argSig.typ != sigNone {
+				return nil, argSig
+			}
+			return interp.evalDirectEval(args, env)
+		}
+	}
+
 	var thisVal *runtime.Value
 	var callee *runtime.Value
 	var sig signal
@@ -1696,7 +1755,7 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 		if ident, ok := e.Callee.(*ast.Identifier); ok {
 			name = ident.Value
 		}
-		return nil, signal{typ: sigThrow, value: runtime.NewString(fmt.Sprintf("TypeError: %s is not a function", name))}
+		return nil, signal{typ: sigThrow, value: makeErrorObject("TypeError", fmt.Sprintf("%s is not a function", name), env)}
 	}
 
 	// evaluate arguments
@@ -1710,7 +1769,7 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 		if jsErr, ok := err.(*jsError); ok {
 			return nil, signal{typ: sigThrow, value: jsErr.value}
 		}
-		return nil, signal{typ: sigThrow, value: runtime.NewString(err.Error())}
+		return nil, signal{typ: sigThrow, value: errorFromGoError(err, env)}
 	}
 	if result == nil {
 		result = runtime.Undefined
@@ -1721,10 +1780,10 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 func (interp *Interpreter) evalSuperCall(e *ast.CallExpression, env *runtime.Environment) (*runtime.Value, signal) {
 	superVal, err := env.Get("super")
 	if err != nil {
-		return nil, signal{typ: sigThrow, value: runtime.NewString("ReferenceError: super is not defined")}
+		return nil, signal{typ: sigThrow, value: makeErrorObject("ReferenceError", "super is not defined", env)}
 	}
 	if superVal.Type != runtime.TypeObject || superVal.Object == nil || superVal.Object.Callable == nil {
-		return nil, signal{typ: sigThrow, value: runtime.NewString("TypeError: super is not a function")}
+		return nil, signal{typ: sigThrow, value: makeErrorObject("TypeError", "super is not a function", env)}
 	}
 	thisVal, _ := env.Get("this")
 
@@ -1738,7 +1797,7 @@ func (interp *Interpreter) evalSuperCall(e *ast.CallExpression, env *runtime.Env
 		if jsErr, ok := callErr.(*jsError); ok {
 			return nil, signal{typ: sigThrow, value: jsErr.value}
 		}
-		return nil, signal{typ: sigThrow, value: runtime.NewString(callErr.Error())}
+		return nil, signal{typ: sigThrow, value: errorFromGoError(callErr, env)}
 	}
 	if result == nil {
 		result = runtime.Undefined
@@ -1979,7 +2038,7 @@ func (interp *Interpreter) evalMember(e *ast.MemberExpression, env *runtime.Envi
 		if ident, ok := e.Object.(*ast.Identifier); ok {
 			name = ident.Value
 		}
-		return nil, signal{typ: sigThrow, value: runtime.NewString(fmt.Sprintf("TypeError: Cannot read properties of %s (reading '%s')", obj.ToString(), name))}
+		return nil, signal{typ: sigThrow, value: makeErrorObject("TypeError", fmt.Sprintf("Cannot read properties of %s (reading '%s')", obj.ToString(), name), env)}
 	}
 
 	if obj.Type == runtime.TypeString {
@@ -2392,7 +2451,7 @@ func (interp *Interpreter) evalNew(e *ast.NewExpression, env *runtime.Environmen
 	}
 
 	if callee.Type != runtime.TypeObject || callee.Object == nil {
-		return nil, signal{typ: sigThrow, value: runtime.NewString("TypeError: is not a constructor")}
+		return nil, signal{typ: sigThrow, value: makeErrorObject("TypeError", "is not a constructor", env)}
 	}
 
 	args, argSig := interp.evalArguments(e.Arguments, env)
@@ -2425,7 +2484,7 @@ func (interp *Interpreter) evalNew(e *ast.NewExpression, env *runtime.Environmen
 		if jsErr, ok := err.(*jsError); ok {
 			return nil, signal{typ: sigThrow, value: jsErr.value}
 		}
-		return nil, signal{typ: sigThrow, value: runtime.NewString(err.Error())}
+		return nil, signal{typ: sigThrow, value: errorFromGoError(err, env)}
 	}
 
 	// If constructor returns an object, use that; otherwise use this
@@ -2460,4 +2519,92 @@ func (interp *Interpreter) evalTemplateLiteral(e *ast.TemplateLiteralExpr, env *
 		}
 	}
 	return runtime.NewString(sb.String()), signal{}
+}
+
+// evalCodeInEnv parses JS source code and evaluates it in the given environment.
+// Used by both direct eval and indirect eval.
+func (interp *Interpreter) evalCodeInEnv(code string, env *runtime.Environment) (*runtime.Value, signal) {
+	p := parser.New(code)
+	program, errs := p.ParseProgram()
+	if len(errs) > 0 {
+		errMsg := fmt.Sprintf("%v", errs[0])
+		errObj := makeErrorObject("SyntaxError", errMsg, env)
+		return nil, signal{typ: sigThrow, value: errObj}
+	}
+
+	interp.hoist(program.Statements, env)
+
+	var result *runtime.Value
+	for _, stmt := range program.Statements {
+		val, sig := interp.execStatement(stmt, env)
+		if sig.typ != sigNone {
+			return nil, sig
+		}
+		if val != nil {
+			result = val
+		}
+	}
+	if result == nil {
+		return runtime.Undefined, signal{}
+	}
+	return result, signal{}
+}
+
+// evalDirectEval handles direct eval(code) calls with access to the calling scope.
+func (interp *Interpreter) evalDirectEval(args []*runtime.Value, env *runtime.Environment) (*runtime.Value, signal) {
+	if len(args) == 0 {
+		return runtime.Undefined, signal{}
+	}
+	if args[0].Type != runtime.TypeString {
+		return args[0], signal{}
+	}
+	return interp.evalCodeInEnv(args[0].Str, env)
+}
+
+// makeFunctionConstructor creates the global Function constructor.
+func (interp *Interpreter) makeFunctionConstructor(env *runtime.Environment) *runtime.Value {
+	ctor := func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+		var paramStr, bodyStr string
+		if len(args) == 0 {
+			bodyStr = ""
+		} else if len(args) == 1 {
+			bodyStr = args[0].ToString()
+		} else {
+			params := make([]string, len(args)-1)
+			for i := 0; i < len(args)-1; i++ {
+				params[i] = args[i].ToString()
+			}
+			paramStr = strings.Join(params, ",")
+			bodyStr = args[len(args)-1].ToString()
+		}
+
+		source := "function anonymous(" + paramStr + ") { " + bodyStr + " }"
+		p := parser.New(source)
+		program, errs := p.ParseProgram()
+		if len(errs) > 0 {
+			errMsg := fmt.Sprintf("%v", errs[0])
+			errObj := makeErrorObject("SyntaxError", errMsg, env)
+			return nil, &jsError{value: errObj}
+		}
+
+		if len(program.Statements) == 0 {
+			return runtime.Undefined, nil
+		}
+
+		funcDecl, ok := program.Statements[0].(*ast.FunctionDeclaration)
+		if !ok {
+			return runtime.Undefined, nil
+		}
+
+		// Function constructor creates functions that execute in the global scope
+		fnVal := interp.createFunction(funcDecl.Name, funcDecl.Params, funcDecl.Defaults, funcDecl.Rest, funcDecl.Body, env, false)
+		return fnVal, nil
+	}
+
+	fnObj := runtime.NewFunctionObject(nil, ctor)
+	fnObj.Constructor = ctor
+	fnObj.Set("prototype", runtime.NewObject(runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)))
+	fnObj.Set("length", runtime.NewNumber(1))
+	fnObj.Set("name", runtime.NewString("Function"))
+	return runtime.NewObject(fnObj)
 }

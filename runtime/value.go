@@ -126,6 +126,22 @@ func (v *Value) ToString() string {
 	case TypeString:
 		return v.Str
 	case TypeObject:
+		if v.Object != nil && v.Object.OType == ObjTypeError {
+			name := v.Object.Get("name")
+			msg := v.Object.Get("message")
+			nameStr := "Error"
+			if name != nil && name.Type == TypeString && name.Str != "" {
+				nameStr = name.Str
+			}
+			msgStr := ""
+			if msg != nil && msg.Type == TypeString {
+				msgStr = msg.Str
+			}
+			if msgStr == "" {
+				return nameStr
+			}
+			return nameStr + ": " + msgStr
+		}
 		return "[object Object]"
 	default:
 		return "undefined"
