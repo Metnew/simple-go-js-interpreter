@@ -32,6 +32,9 @@ const (
 	LeftShiftAssign
 	RightShiftAssign
 	UnsignedRightShiftAssign
+	NullishAssign    // ??=
+	AndAssign        // &&=
+	OrAssign         // ||=
 	Equal
 	NotEqual
 	StrictEqual
@@ -67,7 +70,8 @@ const (
 	Spread // ...
 	Arrow  // =>
 	QuestionMark
-	OptionalChain // ?.
+	OptionalChain   // ?.
+	NullishCoalesce // ??
 
 	// Keywords
 	Var
