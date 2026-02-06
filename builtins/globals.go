@@ -20,6 +20,8 @@ func registerGlobalFunctions(env *runtime.Environment) {
 	declareFunc(env, "encodeURIComponent", 1, globalEncodeURIComponent)
 	declareFunc(env, "decodeURIComponent", 1, globalDecodeURIComponent)
 	declareFunc(env, "eval", 1, globalEval)
+	declareFunc(env, "escape", 1, globalEscape)
+	declareFunc(env, "unescape", 1, globalUnescape)
 
 	env.Declare("undefined", "var", runtime.Undefined)
 	env.Declare("NaN", "var", runtime.NaN)
@@ -187,4 +189,64 @@ func encodeURIHelper(s string, safe string) string {
 		}
 	}
 	return sb.String()
+}
+
+// escape encodes a string using the legacy escape encoding.
+// Characters not encoded: A-Z a-z 0-9 @ * _ + - . /
+func globalEscape(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+	s := argAt(args, 0).ToString()
+	var sb strings.Builder
+	for _, r := range s {
+		if isEscapeSafe(r) {
+			sb.WriteRune(r)
+		} else if r <= 0xFF {
+			sb.WriteString(fmt.Sprintf("%%%02X", r))
+		} else {
+			sb.WriteString(fmt.Sprintf("%%u%04X", r))
+		}
+	}
+	return runtime.NewString(sb.String()), nil
+}
+
+func isEscapeSafe(r rune) bool {
+	if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+		return true
+	}
+	switch r {
+	case '@', '*', '_', '+', '-', '.', '/':
+		return true
+	}
+	return false
+}
+
+// unescape decodes a string produced by escape.
+func globalUnescape(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+	s := argAt(args, 0).ToString()
+	var sb strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '%' {
+			if i+5 < len(s) && s[i+1] == 'u' {
+				hex := s[i+2 : i+6]
+				n, err := strconv.ParseInt(hex, 16, 32)
+				if err == nil {
+					sb.WriteRune(rune(n))
+					i += 6
+					continue
+				}
+			}
+			if i+2 < len(s) {
+				hex := s[i+1 : i+3]
+				n, err := strconv.ParseInt(hex, 16, 32)
+				if err == nil {
+					sb.WriteRune(rune(n))
+					i += 3
+					continue
+				}
+			}
+		}
+		sb.WriteByte(s[i])
+		i++
+	}
+	return runtime.NewString(sb.String()), nil
 }

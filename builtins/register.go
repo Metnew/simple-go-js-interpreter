@@ -13,6 +13,18 @@ func RegisterAll(env *runtime.Environment, globalObj *runtime.Object) {
 	functionCtor, _ := createFunctionConstructor(objProto)
 	env.Declare("Function", "var", runtime.NewObject(functionCtor))
 
+	// Now that FunctionPrototype exists, set the global defaults so all future
+	// function objects (including user-created ones) inherit call/apply/bind,
+	// and ordinary objects inherit from Object.prototype.
+	runtime.DefaultFunctionPrototype = FunctionPrototype
+	runtime.DefaultObjectPrototype = objProto
+
+	// Fix up Object ctor/proto methods that were created before FunctionPrototype existed
+	setFuncPrototypeRecursive(objectCtor)
+	setFuncPrototypeRecursive(objProto)
+	// Also fix the Function ctor itself
+	setFuncPrototypeRecursive(functionCtor)
+
 	// 3. Array
 	arrayCtor, _ := createArrayConstructor(objProto)
 	env.Declare("Array", "var", runtime.NewObject(arrayCtor))
@@ -95,10 +107,14 @@ func RegisterAll(env *runtime.Environment, globalObj *runtime.Object) {
 	consoleObj := createConsoleObject(objProto)
 	env.Declare("console", "var", runtime.NewObject(consoleObj))
 
-	// 16. Global functions (parseInt, parseFloat, isNaN, etc.)
+	// 16. Date
+	dateCtor, _ := createDateConstructor(objProto)
+	env.Declare("Date", "var", runtime.NewObject(dateCtor))
+
+	// 17. Global functions (parseInt, parseFloat, isNaN, etc.)
 	registerGlobalFunctions(env)
 
-	// 17. Set up global object properties if provided
+	// 18. Set up global object properties if provided
 	if globalObj != nil {
 		globalObj.Prototype = objProto
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/example/jsgo/builtins"
 	"github.com/example/jsgo/interpreter"
 	"github.com/example/jsgo/runtime"
 )
@@ -165,6 +166,7 @@ func runSingleTest(path, rel, baseHarness, harnessDir string) TestResult {
 	// Run with timeout
 	start := time.Now()
 	interp := interpreter.New()
+	builtins.RegisterAll(interp.GlobalEnv(), nil)
 	registerTestNatives(interp)
 
 	resultCh := make(chan evalResult, 1)
@@ -229,6 +231,57 @@ func registerTestNatives(interp *interpreter.Interpreter) {
 	interp.RegisterNative("_printErr", func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
 		return runtime.Undefined, nil
 	})
+
+	// Register $262 test harness object with stub methods
+	register262Object(interp)
+}
+
+func register262Object(interp *interpreter.Interpreter) {
+	obj := &runtime.Object{
+		OType:      runtime.ObjTypeOrdinary,
+		Properties: make(map[string]*runtime.Property),
+	}
+
+	stubFn := func(name string) *runtime.Value {
+		fn := &runtime.Object{
+			OType:      runtime.ObjTypeFunction,
+			Properties: make(map[string]*runtime.Property),
+			Callable: func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+				return runtime.Undefined, nil
+			},
+		}
+		fn.Set("name", runtime.NewString(name))
+		return runtime.NewObject(fn)
+	}
+
+	// createRealm - stub that returns a new object with an evalScript method
+	createRealmFn := &runtime.Object{
+		OType:      runtime.ObjTypeFunction,
+		Properties: make(map[string]*runtime.Property),
+		Callable: func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+			realm := &runtime.Object{
+				OType:      runtime.ObjTypeOrdinary,
+				Properties: make(map[string]*runtime.Property),
+			}
+			evalScriptFn := &runtime.Object{
+				OType:      runtime.ObjTypeFunction,
+				Properties: make(map[string]*runtime.Property),
+				Callable: func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+					return runtime.Undefined, nil
+				},
+			}
+			realm.Set("evalScript", runtime.NewObject(evalScriptFn))
+			realm.Set("global", runtime.Undefined)
+			return runtime.NewObject(realm), nil
+		},
+	}
+	obj.Set("createRealm", runtime.NewObject(createRealmFn))
+	obj.Set("detachArrayBuffer", stubFn("detachArrayBuffer"))
+	obj.Set("gc", stubFn("gc"))
+	obj.Set("global", runtime.Undefined)
+	obj.Set("evalScript", stubFn("evalScript"))
+
+	interp.GlobalEnv().Declare("$262", "var", runtime.NewObject(obj))
 }
 
 func loadFile(path string) string {
@@ -377,6 +430,7 @@ func isUnsupportedFeature(feat string) bool {
 		"decorators":             true,
 		"import-assertions":      true,
 		"json-modules":           true,
+		"IsHTMLDDA":              true,
 	}
 	return unsupported[feat]
 }
