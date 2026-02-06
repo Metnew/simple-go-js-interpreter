@@ -35,10 +35,27 @@ type jsError struct {
 }
 
 func (e *jsError) Error() string {
-	if e.value != nil {
-		return e.value.ToString()
+	if e.value == nil {
+		return "undefined"
 	}
-	return "undefined"
+	if e.value.Type == runtime.TypeObject && e.value.Object != nil {
+		name := e.value.Object.Get("name")
+		msg := e.value.Object.Get("message")
+		if name != nil && name.Type == runtime.TypeString && msg != nil && msg.Type == runtime.TypeString {
+			return name.Str + ": " + msg.Str
+		}
+		if msg != nil && msg.Type == runtime.TypeString {
+			return msg.Str
+		}
+		toStr := e.value.Object.Get("toString")
+		if toStr != nil && toStr.Type == runtime.TypeObject && toStr.Object != nil && toStr.Object.Callable != nil {
+			result, err := toStr.Object.Callable(e.value, nil)
+			if err == nil && result != nil {
+				return result.ToString()
+			}
+		}
+	}
+	return e.value.ToString()
 }
 
 // makeErrorObject creates a proper JS Error object (TypeError, ReferenceError, etc.)
