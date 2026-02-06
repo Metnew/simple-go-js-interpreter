@@ -101,14 +101,36 @@ func (l *Lexer) skipBlockComment() {
 }
 
 func (l *Lexer) skipWhitespaceAndComments() {
+	sawNewline := l.col <= 1 // treat start of input as start of line
 	for {
+		prevLine := l.line
 		l.skipWhitespace()
+		if l.line > prevLine {
+			sawNewline = true
+		}
 		if l.ch == '/' && l.peekChar() == '/' {
 			l.skipLineComment()
+			sawNewline = true // line comment ends at newline
 			continue
 		}
 		if l.ch == '/' && l.peekChar() == '*' {
+			prevLine = l.line
 			l.skipBlockComment()
+			if l.line > prevLine {
+				sawNewline = true
+			}
+			continue
+		}
+		// Annex B: <!-- is a single-line comment (anywhere)
+		if l.ch == '<' && l.peekChar() == '!' && l.peekCharAt(1) == '-' && l.peekCharAt(2) == '-' {
+			l.skipLineComment()
+			sawNewline = true
+			continue
+		}
+		// Annex B: --> is a single-line comment ONLY after a line terminator
+		if sawNewline && l.ch == '-' && l.peekChar() == '-' && l.peekCharAt(1) == '>' {
+			l.skipLineComment()
+			sawNewline = true
 			continue
 		}
 		break
@@ -455,6 +477,23 @@ func (l *Lexer) readIdentifier(line, col int) token.Token {
 	return token.Token{Type: tt, Literal: literal, Line: line, Column: col}
 }
 
+// writeUTF16CodeUnit writes a UTF-16 code unit (including surrogates) to a string builder.
+// For surrogates, it uses WTF-8 encoding (3-byte sequences like regular code points)
+// rather than the replacement character that Go's WriteRune would produce.
+func writeUTF16CodeUnit(buf *strings.Builder, cu uint16) {
+	if cu < 0x80 {
+		buf.WriteByte(byte(cu))
+	} else if cu < 0x800 {
+		buf.WriteByte(byte(0xC0 | (cu >> 6)))
+		buf.WriteByte(byte(0x80 | (cu & 0x3F)))
+	} else {
+		// This works for surrogates too (0xD800-0xDFFF) using WTF-8 encoding
+		buf.WriteByte(byte(0xE0 | (cu >> 12)))
+		buf.WriteByte(byte(0x80 | ((cu >> 6) & 0x3F)))
+		buf.WriteByte(byte(0x80 | (cu & 0x3F)))
+	}
+}
+
 func (l *Lexer) readUnicodeEscape() int {
 	if l.ch == '{' {
 		// \u{XXXX} form
@@ -510,8 +549,20 @@ func (l *Lexer) readString(line, col int) token.Token {
 				buf.WriteByte('\'')
 			case '"':
 				buf.WriteByte('"')
-			case '0':
-				buf.WriteByte(0)
+			case '0', '1', '2', '3', '4', '5', '6', '7':
+				// Octal escape sequence (Annex B, non-strict mode)
+				val := int(l.ch - '0')
+				l.readChar()
+				if l.ch >= '0' && l.ch <= '7' {
+					val = val*8 + int(l.ch-'0')
+					l.readChar()
+					if val <= 037 && l.ch >= '0' && l.ch <= '7' {
+						val = val*8 + int(l.ch-'0')
+						l.readChar()
+					}
+				}
+				buf.WriteRune(rune(val))
+				continue
 			case 'b':
 				buf.WriteByte('\b')
 			case 'f':
@@ -526,14 +577,40 @@ func (l *Lexer) readString(line, col int) token.Token {
 				if d1 < 0 || d2 < 0 {
 					return token.Token{Type: token.Illegal, Literal: "invalid hex escape", Line: line, Column: col}
 				}
-				buf.WriteByte(byte(d1*16 + d2))
+				buf.WriteRune(rune(d1*16 + d2))
 			case 'u':
 				l.readChar()
 				r := l.readUnicodeEscape()
 				if r < 0 {
 					return token.Token{Type: token.Illegal, Literal: "invalid unicode escape", Line: line, Column: col}
 				}
-				buf.WriteRune(rune(r))
+				// Handle surrogate pairs: if high surrogate followed by \uDCxx
+				if r >= 0xD800 && r <= 0xDBFF && l.ch == '\\' && l.peekChar() == 'u' {
+					// Save position to backtrack if not a low surrogate
+					savedPos := l.pos
+					savedReadPos := l.readPos
+					savedCh := l.ch
+					l.readChar() // skip '\'
+					l.readChar() // skip 'u'
+					r2 := l.readUnicodeEscape()
+					if r2 >= 0xDC00 && r2 <= 0xDFFF {
+						// Valid surrogate pair - combine
+						combined := 0x10000 + (r-0xD800)*0x400 + (r2 - 0xDC00)
+						buf.WriteRune(rune(combined))
+					} else {
+						// Not a low surrogate - write high surrogate as-is and backtrack
+						writeUTF16CodeUnit(&buf, uint16(r))
+						// Restore position
+						l.pos = savedPos
+						l.readPos = savedReadPos
+						l.ch = savedCh
+					}
+				} else if r >= 0xD800 && r <= 0xDFFF {
+					// Lone surrogate - write as raw bytes
+					writeUTF16CodeUnit(&buf, uint16(r))
+				} else {
+					buf.WriteRune(rune(r))
+				}
 				continue // readUnicodeEscape already advanced past the escape
 			case '\n':
 				l.line++
@@ -722,9 +799,20 @@ func (l *Lexer) readTemplateEscape(buf *strings.Builder) {
 	case '$':
 		buf.WriteByte('$')
 		l.readChar()
-	case '0':
-		buf.WriteByte(0)
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		// Octal escape sequence (Annex B, non-strict mode)
+		val := int(l.ch - '0')
 		l.readChar()
+		if l.ch >= '0' && l.ch <= '7' {
+			val = val*8 + int(l.ch-'0')
+			l.readChar()
+			if val <= 037 && l.ch >= '0' && l.ch <= '7' {
+				val = val*8 + int(l.ch-'0')
+				l.readChar()
+			}
+		}
+		buf.WriteRune(rune(val))
+		return
 	case '\n':
 		l.line++
 		l.col = 0
@@ -743,13 +831,13 @@ func (l *Lexer) readRegExp(line, col int) token.Token {
 
 	inCharClass := false
 	for {
-		if l.ch == 0 || l.ch == '\n' {
+		if (l.ch == 0 && l.pos >= len(l.input)) || l.ch == '\n' || l.ch == '\r' {
 			return token.Token{Type: token.Illegal, Literal: "unterminated regexp", Line: line, Column: col}
 		}
 		if l.ch == '\\' {
 			buf.WriteRune(l.ch)
 			l.readChar()
-			if l.ch == 0 || l.ch == '\n' {
+			if (l.ch == 0 && l.pos >= len(l.input)) || l.ch == '\n' || l.ch == '\r' {
 				return token.Token{Type: token.Illegal, Literal: "unterminated regexp", Line: line, Column: col}
 			}
 			buf.WriteRune(l.ch)

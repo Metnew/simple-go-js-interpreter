@@ -4,10 +4,11 @@ import "fmt"
 
 // Environment represents a lexical scope.
 type Environment struct {
-	store      map[string]*Binding
-	outer      *Environment
-	isBlock    bool // true for block scopes (let/const), false for function scopes
+	store       map[string]*Binding
+	outer       *Environment
+	isBlock     bool // true for block scopes (let/const), false for function scopes
 	annexBNames map[string]bool // names hoisted by Annex B (block-level function decls)
+	globalObj   *Object // if set, var/function bindings are mirrored as properties
 }
 
 type Binding struct {
@@ -25,11 +26,64 @@ func NewEnvironment(outer *Environment, isBlock bool) *Environment {
 	}
 }
 
+// SetGlobalObject links this environment to a global object so that
+// var/function bindings are mirrored as own properties of the object.
+func (e *Environment) SetGlobalObject(obj *Object) {
+	e.globalObj = obj
+	// Set up bidirectional link
+	if obj.Internal == nil {
+		obj.Internal = make(map[string]interface{})
+	}
+	obj.Internal["globalEnv"] = e
+	// Mirror existing bindings (these are builtins since this runs before user code)
+	for name, binding := range e.store {
+		if binding.Kind == "var" || binding.Kind == "function" {
+			// Builtin bindings are non-enumerable per spec
+			obj.Properties[name] = &Property{
+				Value:        binding.Value,
+				Writable:     true,
+				Enumerable:   false,
+				Configurable: true,
+			}
+		}
+	}
+}
+
+// GlobalObject returns the global object if set.
+func (e *Environment) GlobalObject() *Object {
+	return e.globalObj
+}
+
+// GetBinding returns the binding for a name in the current scope only.
+func (e *Environment) GetBinding(name string) (*Binding, bool) {
+	b, ok := e.store[name]
+	return b, ok
+}
+
+// DeclareNoMirror declares a variable without mirroring to the global object.
+// Used by Object.DefineProperty to avoid infinite recursion.
+func (e *Environment) DeclareNoMirror(name string, kind string, value *Value) {
+	if _, exists := e.store[name]; exists {
+		return
+	}
+	e.store[name] = &Binding{
+		Value:    value,
+		Mutable:  true,
+		Kind:     kind,
+		Declared: true,
+	}
+}
+
 // Declare declares a variable in the current scope.
 func (e *Environment) Declare(name string, kind string, value *Value) error {
 	if kind == "let" || kind == "const" {
-		if _, exists := e.store[name]; exists {
-			return fmt.Errorf("SyntaxError: Identifier '%s' has already been declared", name)
+		if existing, exists := e.store[name]; exists {
+			// At global scope, let/const can shadow var bindings (they live in
+			// separate environment records per spec). Only reject if existing
+			// is also a lexical (let/const) binding.
+			if existing.Kind == "let" || existing.Kind == "const" {
+				return fmt.Errorf("SyntaxError: Identifier '%s' has already been declared", name)
+			}
 		}
 	}
 	e.store[name] = &Binding{
@@ -37,6 +91,20 @@ func (e *Environment) Declare(name string, kind string, value *Value) error {
 		Mutable:  kind != "const",
 		Kind:     kind,
 		Declared: true,
+	}
+	// Mirror var/function bindings to global object
+	if e.globalObj != nil && (kind == "var" || kind == "function") {
+		if existing, ok := e.globalObj.Properties[name]; ok {
+			// Only update value; preserve existing configurability
+			existing.Value = value
+		} else {
+			e.globalObj.Properties[name] = &Property{
+				Value:        value,
+				Writable:     true,
+				Enumerable:   true,
+				Configurable: true,
+			}
+		}
 	}
 	return nil
 }
@@ -52,6 +120,12 @@ func (e *Environment) Get(name string) (*Value, error) {
 	if e.outer != nil {
 		return e.outer.Get(name)
 	}
+	// At global scope, fall back to the global object (object environment record)
+	if e.globalObj != nil {
+		if prop, ok := e.globalObj.Properties[name]; ok {
+			return prop.Value, nil
+		}
+	}
 	return nil, fmt.Errorf("ReferenceError: %s is not defined", name)
 }
 
@@ -62,6 +136,12 @@ func (e *Environment) Set(name string, value *Value) error {
 			return fmt.Errorf("TypeError: Assignment to constant variable '%s'", name)
 		}
 		binding.Value = value
+		// Mirror to global object
+		if e.globalObj != nil && (binding.Kind == "var" || binding.Kind == "function") {
+			if prop, ok := e.globalObj.Properties[name]; ok {
+				prop.Value = value
+			}
+		}
 		return nil
 	}
 	if e.outer != nil {
@@ -74,6 +154,12 @@ func (e *Environment) Set(name string, value *Value) error {
 func (e *Environment) SetInCurrentScope(name string, value *Value) {
 	if binding, ok := e.store[name]; ok {
 		binding.Value = value
+		// Mirror to global object
+		if e.globalObj != nil {
+			if prop, ok := e.globalObj.Properties[name]; ok {
+				prop.Value = value
+			}
+		}
 		return
 	}
 	e.store[name] = &Binding{
@@ -82,6 +168,15 @@ func (e *Environment) SetInCurrentScope(name string, value *Value) {
 		Kind:     "var",
 		Declared: true,
 	}
+	// Mirror to global object
+	if e.globalObj != nil {
+		e.globalObj.Properties[name] = &Property{
+			Value:        value,
+			Writable:     true,
+			Enumerable:   true,
+			Configurable: true,
+		}
+	}
 }
 
 // DeclareVar declares a var binding only if the name doesn't already exist in this scope.
@@ -89,6 +184,10 @@ func (e *Environment) SetInCurrentScope(name string, value *Value) {
 // but must not overwrite existing bindings (var, let, const, or function).
 // Tracks the name as an Annex B hoisted name for runtime propagation checks.
 func (e *Environment) DeclareVar(name string) {
+	e.DeclareVarEx(name, true)
+}
+
+func (e *Environment) DeclareVarEx(name string, configurable bool) {
 	if e.annexBNames == nil {
 		e.annexBNames = make(map[string]bool)
 	}
@@ -101,6 +200,17 @@ func (e *Environment) DeclareVar(name string) {
 		Mutable:  true,
 		Kind:     "var",
 		Declared: true,
+	}
+	// Mirror to global object
+	if e.globalObj != nil {
+		if _, exists := e.globalObj.Properties[name]; !exists {
+			e.globalObj.Properties[name] = &Property{
+				Value:        Undefined,
+				Writable:     true,
+				Enumerable:   true,
+				Configurable: configurable,
+			}
+		}
 	}
 }
 

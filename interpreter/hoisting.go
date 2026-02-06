@@ -11,6 +11,18 @@ import (
 // 2. Hoisting function declarations at the current level with their values
 // 3. Annex B: hoisting function declarations inside blocks to function scope
 func (interp *Interpreter) hoistComprehensive(stmts []ast.Statement, env *runtime.Environment) {
+	interp.hoistComprehensiveImpl(stmts, env, false)
+}
+
+// hoistComprehensiveEval is like hoistComprehensive but for eval code.
+// Per B.3.3.3, eval code Annex B hoisting should not skip names that are
+// parameters in the enclosing function (since var declarations don't conflict
+// with parameters).
+func (interp *Interpreter) hoistComprehensiveEval(stmts []ast.Statement, env *runtime.Environment) {
+	interp.hoistComprehensiveImpl(stmts, env, true)
+}
+
+func (interp *Interpreter) hoistComprehensiveImpl(stmts []ast.Statement, env *runtime.Environment, isEval bool) {
 	funcScope := env.GetFunctionScope()
 
 	// First pass: recursively hoist all var declarations to function scope.
@@ -36,20 +48,21 @@ func (interp *Interpreter) hoistComprehensive(stmts []ast.Statement, env *runtim
 	// or parameter names (including "arguments").
 	if funcScope == env {
 		lexicalNames := interp.collectTopLevelLexicalNames(stmts)
-		// Per spec B.3.3.1: skip names that are in parameterNames.
-		// Parameter names are already bound as "let" in the function scope,
-		// and "arguments" is bound as "var". Collect all existing non-var
-		// bindings plus "arguments" (which is a special parameter name).
-		env.ForEachBinding(func(name string, kind string) {
-			if kind == "let" || kind == "const" {
-				lexicalNames[name] = true
-			}
-		})
-		// "arguments" is in parameterNames per spec step 22f, skip it
-		if env.HasBinding("arguments") {
+		if !isEval {
+			// Per spec B.3.3.1: skip names that are in parameterNames.
+			// Parameter names are already bound as "let" in the function scope,
+			// and "arguments" is bound as "var". Collect all existing non-var
+			// bindings plus "arguments" (which is a special parameter name).
+			env.ForEachBinding(func(name string, kind string) {
+				if kind == "let" || kind == "const" {
+					lexicalNames[name] = true
+				}
+			})
+			// "arguments" is always in parameterNames per spec step 22f, skip it
+			// for non-arrow function scopes
 			lexicalNames["arguments"] = true
 		}
-		interp.collectBlockFuncDecls(stmts, env, lexicalNames)
+		interp.collectBlockFuncDecls(stmts, env, lexicalNames, isEval)
 	}
 }
 
@@ -168,9 +181,9 @@ func (interp *Interpreter) collectVarDeclsFromStmt(stmt ast.Statement, funcScope
 // it gets assigned when the declaration is reached during execution.
 // Names in lexicalNames are skipped (they conflict with let/const at this or any
 // enclosing block level between the function scope and the declaration).
-func (interp *Interpreter) collectBlockFuncDecls(stmts []ast.Statement, env *runtime.Environment, lexicalNames map[string]bool) {
+func (interp *Interpreter) collectBlockFuncDecls(stmts []ast.Statement, env *runtime.Environment, lexicalNames map[string]bool, isEval bool) {
 	for _, stmt := range stmts {
-		interp.collectBlockFuncDeclsFromStmt(stmt, env, lexicalNames)
+		interp.collectBlockFuncDeclsFromStmt(stmt, env, lexicalNames, isEval)
 	}
 }
 
@@ -215,12 +228,14 @@ func mergeLexicalNames(a, b map[string]bool) map[string]bool {
 // declarations using only the parent lexical names (so they don't block themselves),
 // then recurses deeper with merged lexical names (including this block's let/const/function
 // names) so deeper function declarations are blocked appropriately.
-func (interp *Interpreter) collectBlockFuncDeclsInBlock(stmts []ast.Statement, env *runtime.Environment, lexicalNames map[string]bool) {
+func (interp *Interpreter) collectBlockFuncDeclsInBlock(stmts []ast.Statement, env *runtime.Environment, lexicalNames map[string]bool, isEval bool) {
 	// Direct function declarations at this level are checked against parent lexicalNames only
 	for _, inner := range stmts {
 		if fd, ok := inner.(*ast.FunctionDeclaration); ok {
 			if !lexicalNames[fd.Name.Value] {
-				env.DeclareVar(fd.Name.Value)
+				// In eval code: configurable=true (CreateGlobalVarBinding)
+				// In non-eval global code: configurable=false (CreateGlobalFunctionBinding)
+				env.DeclareVarEx(fd.Name.Value, isEval)
 			}
 		}
 	}
@@ -230,37 +245,32 @@ func (interp *Interpreter) collectBlockFuncDeclsInBlock(stmts []ast.Statement, e
 	merged := mergeLexicalNames(lexicalNames, blockLexNames)
 
 	for _, inner := range stmts {
-		interp.collectBlockFuncDeclsFromStmt(inner, env, merged)
+		interp.collectBlockFuncDeclsFromStmt(inner, env, merged, isEval)
 	}
 }
 
-func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env *runtime.Environment, lexicalNames map[string]bool) {
+func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env *runtime.Environment, lexicalNames map[string]bool, isEval bool) {
 	switch s := stmt.(type) {
 	case *ast.BlockStatement:
-		interp.collectBlockFuncDeclsInBlock(s.Statements, env, lexicalNames)
+		interp.collectBlockFuncDeclsInBlock(s.Statements, env, lexicalNames, isEval)
 	case *ast.IfStatement:
 		if s.Consequence != nil {
-			interp.collectBlockFuncDeclsInBlock(s.Consequence.Statements, env, lexicalNames)
+			interp.collectBlockFuncDeclsInBlock(s.Consequence.Statements, env, lexicalNames, isEval)
 		}
 		if s.Alternative != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Alternative, env, lexicalNames)
+			interp.collectBlockFuncDeclsFromStmt(s.Alternative, env, lexicalNames, isEval)
 		}
 	case *ast.SwitchStatement:
-		// Switch cases share a single block scope; collect lexical names across all cases.
 		var allStmts []ast.Statement
 		for _, c := range s.Cases {
 			allStmts = append(allStmts, c.Consequent...)
 		}
-		interp.collectBlockFuncDeclsInBlock(allStmts, env, lexicalNames)
+		interp.collectBlockFuncDeclsInBlock(allStmts, env, lexicalNames, isEval)
 	case *ast.TryStatement:
 		if s.Block != nil {
-			interp.collectBlockFuncDeclsInBlock(s.Block.Statements, env, lexicalNames)
+			interp.collectBlockFuncDeclsInBlock(s.Block.Statements, env, lexicalNames, isEval)
 		}
 		if s.Handler != nil && s.Handler.Body != nil {
-			// Per B.3.5: catch parameter blocks Annex B hoisting ONLY when it is
-			// a destructuring pattern (not a simple BindingIdentifier).
-			// A simple catch(f) allows var f inside the block, so Annex B hoisting
-			// of function f is also allowed. But catch({f}) or catch([f]) blocks it.
 			catchLex := make(map[string]bool)
 			if s.Handler.Param != nil {
 				if _, isIdent := s.Handler.Param.(*ast.Identifier); !isIdent {
@@ -270,13 +280,12 @@ func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env
 				}
 			}
 			merged := mergeLexicalNames(lexicalNames, catchLex)
-			interp.collectBlockFuncDeclsInBlock(s.Handler.Body.Statements, env, merged)
+			interp.collectBlockFuncDeclsInBlock(s.Handler.Body.Statements, env, merged, isEval)
 		}
 		if s.Finalizer != nil {
-			interp.collectBlockFuncDeclsInBlock(s.Finalizer.Statements, env, lexicalNames)
+			interp.collectBlockFuncDeclsInBlock(s.Finalizer.Statements, env, lexicalNames, isEval)
 		}
 	case *ast.ForStatement:
-		// for (let f; ...) introduces lexical names that block hoisting in body
 		forLex := make(map[string]bool)
 		if s.Init != nil {
 			if vd, ok := s.Init.(*ast.VariableDeclaration); ok {
@@ -291,7 +300,7 @@ func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env
 		}
 		merged := mergeLexicalNames(lexicalNames, forLex)
 		if s.Body != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Body, env, merged)
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, merged, isEval)
 		}
 	case *ast.ForInStatement:
 		forLex := make(map[string]bool)
@@ -306,7 +315,7 @@ func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env
 		}
 		merged := mergeLexicalNames(lexicalNames, forLex)
 		if s.Body != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Body, env, merged)
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, merged, isEval)
 		}
 	case *ast.ForOfStatement:
 		forLex := make(map[string]bool)
@@ -321,17 +330,17 @@ func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env
 		}
 		merged := mergeLexicalNames(lexicalNames, forLex)
 		if s.Body != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Body, env, merged)
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, merged, isEval)
 		}
 	case *ast.WhileStatement:
 		if s.Body != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames, isEval)
 		}
 	case *ast.DoWhileStatement:
 		if s.Body != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames, isEval)
 		}
 	case *ast.LabeledStatement:
-		interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+		interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames, isEval)
 	}
 }

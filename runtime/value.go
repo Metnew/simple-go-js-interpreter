@@ -125,6 +125,11 @@ func (v *Value) ToString() string {
 		return fmt.Sprintf("%g", v.Number)
 	case TypeString:
 		return v.Str
+	case TypeSymbol:
+		if v.Symbol != nil {
+			return "Symbol(" + v.Symbol.Description + ")"
+		}
+		return "Symbol()"
 	case TypeObject:
 		if v.Object != nil && v.Object.OType == ObjTypeError {
 			name := v.Object.Get("name")
@@ -146,6 +151,28 @@ func (v *Value) ToString() string {
 	default:
 		return "undefined"
 	}
+}
+
+// ToPropertyKey returns the string key for use as an object property key.
+// For Symbols, it returns a unique internal string representation.
+func (v *Value) ToPropertyKey() string {
+	if v.Type == TypeSymbol && v.Symbol != nil {
+		return v.Symbol.Key()
+	}
+	return v.ToString()
+}
+
+// Key returns a unique string key for this symbol, used as a property key.
+func (s *Symbol) Key() string {
+	return fmt.Sprintf("@@sym(%s)@%p", s.Description, s)
+}
+
+// GetSymbol retrieves a symbol-keyed property.
+func (o *Object) GetSymbol(sym *Symbol) *Value {
+	if sym == nil {
+		return nil
+	}
+	return o.Get(sym.Key())
 }
 
 // ObjectType describes the kind of object.
@@ -245,6 +272,14 @@ func (o *Object) Set(name string, val *Value) {
 		}
 		if prop.Writable {
 			prop.Value = val
+			// Mirror to global env
+			if o.Internal != nil {
+				if env, ok2 := o.Internal["globalEnv"].(*Environment); ok2 {
+					if binding, exists := env.GetBinding(name); exists {
+						binding.Value = val
+					}
+				}
+			}
 		}
 		return
 	}
@@ -254,11 +289,33 @@ func (o *Object) Set(name string, val *Value) {
 		Enumerable:   true,
 		Configurable: true,
 	}
+	// Mirror to global env
+	if o.Internal != nil {
+		if env, ok := o.Internal["globalEnv"].(*Environment); ok {
+			env.DeclareNoMirror(name, "var", val)
+		}
+	}
 }
 
 // DefineProperty defines a property with full descriptor control.
 func (o *Object) DefineProperty(name string, prop *Property) {
 	o.Properties[name] = prop
+	// If this object is a global object linked to an environment, mirror to env
+	if o.Internal != nil {
+		if env, ok := o.Internal["globalEnv"].(*Environment); ok {
+			if binding, exists := env.GetBinding(name); exists {
+				if prop.HasValue {
+					binding.Value = prop.Value
+				}
+			} else if prop.HasValue || prop.Value != nil {
+				val := prop.Value
+				if val == nil {
+					val = Undefined
+				}
+				env.DeclareNoMirror(name, "var", val)
+			}
+		}
+	}
 }
 
 // HasProperty checks own and prototype chain.

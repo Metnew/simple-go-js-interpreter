@@ -214,7 +214,7 @@ func objectDefineProperty(this *runtime.Value, args []*runtime.Value) (*runtime.
 		return runtime.Undefined, fmt.Errorf("TypeError: Object.defineProperty called on non-object")
 	}
 	obj := arg0.Object
-	name := argAt(args, 1).ToString()
+	name := argAt(args, 1).ToPropertyKey()
 	descArg := argAt(args, 2)
 	if descArg.Type != runtime.TypeObject || descArg.Object == nil {
 		return runtime.Undefined, fmt.Errorf("TypeError: Property description must be an object")
@@ -251,7 +251,7 @@ func objectGetOwnPropertyDescriptor(this *runtime.Value, args []*runtime.Value) 
 	if obj == nil {
 		return runtime.Undefined, nil
 	}
-	name := argAt(args, 1).ToString()
+	name := argAt(args, 1).ToPropertyKey()
 	prop, ok := obj.Properties[name]
 	if !ok {
 		return runtime.Undefined, nil

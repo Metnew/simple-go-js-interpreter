@@ -284,7 +284,20 @@ func register262Object(interp *interpreter.Interpreter) {
 	obj.Set("detachArrayBuffer", stubFn("detachArrayBuffer"))
 	obj.Set("gc", stubFn("gc"))
 	obj.Set("global", runtime.Undefined)
-	obj.Set("evalScript", stubFn("evalScript"))
+
+	// evalScript evaluates code as a global Script (not eval code)
+	// Let/const declarations persist in the global environment
+	evalScriptFn := &runtime.Object{
+		OType:      runtime.ObjTypeFunction,
+		Properties: make(map[string]*runtime.Property),
+		Callable: func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+			if len(args) == 0 || args[0].Type != runtime.TypeString {
+				return runtime.Undefined, nil
+			}
+			return interp.EvalGlobalScript(args[0].Str)
+		},
+	}
+	obj.Set("evalScript", runtime.NewObject(evalScriptFn))
 
 	interp.GlobalEnv().Declare("$262", "var", runtime.NewObject(obj))
 }
@@ -436,6 +449,21 @@ func isUnsupportedFeature(feat string) bool {
 		"import-assertions":      true,
 		"json-modules":           true,
 		"IsHTMLDDA":              true,
+		"Reflect.construct":      true,
+		"arrow-function":         false, // we support this
+		"generators":             true,
+		"async-functions":        true,
+		"async-iteration":        true,
+		"String.prototype.at":    true,
+		"Array.prototype.at":     true,
+		"Object.hasOwn":          true,
+		"array-grouping":         true,
+		"change-array-by-copy":   true,
+		"resizable-arraybuffer":  true,
+		"ArrayBuffer":            true,
+		"TypedArray":             true,
+		"DataView":               true,
+		"legacy-regexp":          true,
 	}
 	return unsupported[feat]
 }

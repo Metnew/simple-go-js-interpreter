@@ -223,6 +223,12 @@ type UndefinedLiteral struct {
 	Token token.Token
 }
 
+type RegExpLiteral struct {
+	Token   token.Token
+	Pattern string
+	Flags   string
+}
+
 type ArrayLiteral struct {
 	Token    token.Token
 	Elements []Expression // may contain nils for elisions [1,,3]
@@ -436,6 +442,7 @@ func (e *StringLiteral) expressionNode()              {}
 func (e *BooleanLiteral) expressionNode()             {}
 func (e *NullLiteral) expressionNode()                {}
 func (e *UndefinedLiteral) expressionNode()           {}
+func (e *RegExpLiteral) expressionNode()               {}
 func (e *ArrayLiteral) expressionNode()               {}
 func (e *ObjectLiteral) expressionNode()              {}
 func (e *FunctionExpression) expressionNode()         {}
@@ -498,6 +505,7 @@ func (e *StringLiteral) TokenLiteral() string              { return e.Token.Lite
 func (e *BooleanLiteral) TokenLiteral() string             { return e.Token.Literal }
 func (e *NullLiteral) TokenLiteral() string                { return e.Token.Literal }
 func (e *UndefinedLiteral) TokenLiteral() string           { return e.Token.Literal }
+func (e *RegExpLiteral) TokenLiteral() string              { return e.Token.Literal }
 func (e *ArrayLiteral) TokenLiteral() string               { return e.Token.Literal }
 func (e *ObjectLiteral) TokenLiteral() string              { return e.Token.Literal }
 func (e *Property) TokenLiteral() string                   { return e.Token.Literal }
@@ -563,6 +571,7 @@ func (e *StringLiteral) nodeType() string              { return "StringLiteral" 
 func (e *BooleanLiteral) nodeType() string             { return "BooleanLiteral" }
 func (e *NullLiteral) nodeType() string                { return "NullLiteral" }
 func (e *UndefinedLiteral) nodeType() string           { return "UndefinedLiteral" }
+func (e *RegExpLiteral) nodeType() string              { return "RegExpLiteral" }
 func (e *ArrayLiteral) nodeType() string               { return "ArrayLiteral" }
 func (e *ObjectLiteral) nodeType() string              { return "ObjectLiteral" }
 func (e *Property) nodeType() string                   { return "Property" }

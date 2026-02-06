@@ -2,6 +2,7 @@ package builtins
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 
@@ -42,6 +43,25 @@ func createStringConstructor(objProto *runtime.Object) (*runtime.Object, *runtim
 	setMethod(proto, "toString", 0, stringToString)
 	setMethod(proto, "valueOf", 0, stringValueOf)
 	setMethod(proto, "at", 1, stringAt)
+	// Annex B aliases - must be the SAME function object as the original
+	trimStartProp := proto.Properties["trimStart"]
+	proto.DefineProperty("trimLeft", trimStartProp)
+	trimEndProp := proto.Properties["trimEnd"]
+	proto.DefineProperty("trimRight", trimEndProp)
+	// Annex B HTML methods
+	setMethod(proto, "anchor", 1, makeHTMLWrapper("a", "name"))
+	setMethod(proto, "big", 0, makeHTMLSimple("big"))
+	setMethod(proto, "blink", 0, makeHTMLSimple("blink"))
+	setMethod(proto, "bold", 0, makeHTMLSimple("b"))
+	setMethod(proto, "fixed", 0, makeHTMLSimple("tt"))
+	setMethod(proto, "fontcolor", 1, makeHTMLWrapper("font", "color"))
+	setMethod(proto, "fontsize", 1, makeHTMLWrapper("font", "size"))
+	setMethod(proto, "italics", 0, makeHTMLSimple("i"))
+	setMethod(proto, "link", 1, makeHTMLWrapper("a", "href"))
+	setMethod(proto, "small", 0, makeHTMLSimple("small"))
+	setMethod(proto, "strike", 0, makeHTMLSimple("strike"))
+	setMethod(proto, "sub", 0, makeHTMLSimple("sub"))
+	setMethod(proto, "sup", 0, makeHTMLSimple("sup"))
 
 	ctor := newFuncObject("String", 1, stringConstructorCall)
 	ctor.Constructor = stringConstructorCall
@@ -57,18 +77,24 @@ func createStringConstructor(objProto *runtime.Object) (*runtime.Object, *runtim
 }
 
 func getStringValue(this *runtime.Value) string {
+	s, _ := getStringValueErr(this)
+	return s
+}
+
+func getStringValueErr(this *runtime.Value) (string, error) {
 	if this == nil {
-		return ""
+		return "", nil
 	}
 	if this.Type == runtime.TypeString {
-		return this.Str
+		return this.Str, nil
 	}
 	if this.Type == runtime.TypeObject && this.Object != nil {
 		if iv, ok := this.Object.Internal["StringData"]; ok {
-			return iv.(string)
+			return iv.(string), nil
 		}
+		return jsToString(this)
 	}
-	return this.ToString()
+	return this.ToString(), nil
 }
 
 func stringConstructorCall(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
@@ -275,26 +301,44 @@ func stringSubstring(this *runtime.Value, args []*runtime.Value) (*runtime.Value
 }
 
 func stringSubstr(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
-	s := getStringValue(this)
-	runes := []rune(s)
-	length := len(runes)
-	start := 0
-	if len(args) > 0 {
-		start = int(toInteger(args[0]))
+	if this == nil || this.Type == runtime.TypeUndefined || this.Type == runtime.TypeNull {
+		return nil, fmt.Errorf("TypeError: Cannot read properties of %s", this.ToString())
 	}
+	s, err := getStringValueErr(this)
+	if err != nil {
+		return nil, err
+	}
+	// Use UTF-16 code units (not code points) per JS spec
+	units := stringToUTF16(s)
+	length := len(units)
+	intStart, err2 := toIntegerErr(argAt(args, 0))
+	if err2 != nil {
+		return nil, err2
+	}
+	if math.IsInf(intStart, -1) {
+		intStart = 0
+	} else if intStart < 0 {
+		intStart = math.Max(float64(length)+intStart, 0)
+	} else if intStart > float64(length) {
+		intStart = float64(length)
+	}
+	start := int(intStart)
 	if start < 0 {
-		start = length + start
-		if start < 0 {
-			start = 0
-		}
+		start = 0
 	}
-	count := length - start
+	if start > length {
+		start = length
+	}
+	var intLength float64
 	if len(args) > 1 && args[1].Type != runtime.TypeUndefined {
-		count = int(toInteger(args[1]))
-		if count < 0 {
-			count = 0
+		intLength, err2 = toIntegerErr(args[1])
+		if err2 != nil {
+			return nil, err2
 		}
+	} else {
+		intLength = float64(length)
 	}
+	count := int(math.Min(math.Max(intLength, 0), float64(length)))
 	if start >= length || count == 0 {
 		return runtime.NewString(""), nil
 	}
@@ -302,7 +346,7 @@ func stringSubstr(this *runtime.Value, args []*runtime.Value) (*runtime.Value, e
 	if end > length {
 		end = length
 	}
-	return runtime.NewString(string(runes[start:end])), nil
+	return runtime.NewString(utf16ToString(units[start:end])), nil
 }
 
 func stringToUpperCase(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
@@ -508,4 +552,41 @@ func stringRaw(this *runtime.Value, args []*runtime.Value) (*runtime.Value, erro
 		}
 	}
 	return runtime.NewString(sb.String()), nil
+}
+
+// Annex B HTML string methods
+func makeHTMLSimple(tag string) runtime.CallableFunc {
+	return func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+		if this == nil || this.Type == runtime.TypeUndefined || this.Type == runtime.TypeNull {
+			return nil, fmt.Errorf("TypeError: String.prototype.%s requires that 'this' not be undefined or null", tag)
+		}
+		s, err := jsToString(this)
+		if err != nil {
+			return nil, err
+		}
+		return runtime.NewString("<" + tag + ">" + s + "</" + tag + ">"), nil
+	}
+}
+
+func makeHTMLWrapper(tag, attr string) runtime.CallableFunc {
+	return func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+		if this == nil || this.Type == runtime.TypeUndefined || this.Type == runtime.TypeNull {
+			return nil, fmt.Errorf("TypeError: String.prototype.%s requires that 'this' not be undefined or null", tag)
+		}
+		s, err := jsToString(this)
+		if err != nil {
+			return nil, err
+		}
+		val := ""
+		if len(args) > 0 {
+			v, verr := jsToString(args[0])
+			if verr != nil {
+				return nil, verr
+			}
+			val = v
+		}
+		// Escape double quotes in attribute value
+		val = strings.ReplaceAll(val, "\"", "&quot;")
+		return runtime.NewString("<" + tag + " " + attr + "=\"" + val + "\">" + s + "</" + tag + ">"), nil
+	}
 }

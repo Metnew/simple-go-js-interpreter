@@ -15,6 +15,11 @@ var (
 	SymToPrimitive *runtime.Symbol
 	SymHasInstance *runtime.Symbol
 	SymToStringTag *runtime.Symbol
+	SymMatch       *runtime.Symbol
+	SymSplit       *runtime.Symbol
+	SymSearch      *runtime.Symbol
+	SymReplace     *runtime.Symbol
+	SymSpecies     *runtime.Symbol
 )
 
 func nextSymbolID() uint64 {
@@ -32,11 +37,21 @@ func createSymbolConstructor(objProto *runtime.Object) *runtime.Object {
 	SymToPrimitive = &runtime.Symbol{Description: "Symbol.toPrimitive"}
 	SymHasInstance = &runtime.Symbol{Description: "Symbol.hasInstance"}
 	SymToStringTag = &runtime.Symbol{Description: "Symbol.toStringTag"}
+	SymMatch = &runtime.Symbol{Description: "Symbol.match"}
+	SymSplit = &runtime.Symbol{Description: "Symbol.split"}
+	SymSearch = &runtime.Symbol{Description: "Symbol.search"}
+	SymReplace = &runtime.Symbol{Description: "Symbol.replace"}
+	SymSpecies = &runtime.Symbol{Description: "Symbol.species"}
 
 	setConstant(ctor, "iterator", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymIterator})
 	setConstant(ctor, "toPrimitive", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymToPrimitive})
 	setConstant(ctor, "hasInstance", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymHasInstance})
 	setConstant(ctor, "toStringTag", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymToStringTag})
+	setConstant(ctor, "match", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymMatch})
+	setConstant(ctor, "split", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymSplit})
+	setConstant(ctor, "search", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymSearch})
+	setConstant(ctor, "replace", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymReplace})
+	setConstant(ctor, "species", &runtime.Value{Type: runtime.TypeSymbol, Symbol: SymSpecies})
 
 	return ctor
 }

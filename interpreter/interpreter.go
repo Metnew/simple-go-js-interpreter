@@ -99,16 +99,24 @@ func errorFromGoError(goErr error, env *runtime.Environment) *runtime.Value {
 
 // Interpreter evaluates an AST using tree-walking.
 type Interpreter struct {
-	global  *runtime.Environment
-	natives map[string]runtime.CallableFunc
+	global       *runtime.Environment
+	natives      map[string]runtime.CallableFunc
+	globalObject *runtime.Value
 }
 
 func New() *Interpreter {
+	globalObj := runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)
 	interp := &Interpreter{
-		global:  runtime.NewEnvironment(nil, false),
-		natives: make(map[string]runtime.CallableFunc),
+		global:       runtime.NewEnvironment(nil, false),
+		natives:      make(map[string]runtime.CallableFunc),
+		globalObject: runtime.NewObject(globalObj),
 	}
 	return interp
+}
+
+// GlobalObject returns the global this object.
+func (interp *Interpreter) GlobalObject() *runtime.Value {
+	return interp.globalObject
 }
 
 // RegisterNative registers a native Go function as a global JS function.
@@ -129,15 +137,25 @@ func (interp *Interpreter) Eval(source string) (*runtime.Value, error) {
 		return nil, fmt.Errorf("parse errors: %v", errs)
 	}
 
-	env := runtime.NewEnvironment(interp.global, false)
+	// Link the global env to the global object so builtins get mirrored
+	interp.global.SetGlobalObject(interp.globalObject.Object)
 
-	// register natives
+	// Use the global env directly so var declarations and eval()-created
+	// bindings all live in the same scope (matching JS spec behavior for
+	// global script evaluation).
+	env := interp.global
+
+	// register natives (only if not already registered)
 	for name, fn := range interp.natives {
-		fnObj := runtime.NewFunctionObject(nil, fn)
-		env.Declare(name, "var", runtime.NewObject(fnObj))
+		if _, err := env.Get(name); err != nil {
+			fnObj := runtime.NewFunctionObject(nil, fn)
+			env.Declare(name, "var", runtime.NewObject(fnObj))
+		}
 	}
 
 	// register eval — tagged via Internal so evalCall can detect direct eval
+	// Always re-declare eval because the interpreter's version has scope access
+	// and the isBuiltinEval tag for direct eval detection
 	evalFnObj := runtime.NewFunctionObject(nil, func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
 		// indirect eval: evaluate in global scope
 		if len(args) == 0 {
@@ -153,14 +171,67 @@ func (interp *Interpreter) Eval(source string) (*runtime.Value, error) {
 		return result, nil
 	})
 	evalFnObj.Internal = map[string]interface{}{"isBuiltinEval": true}
-	evalFnObj.Set("length", runtime.NewNumber(1))
+	evalFnObj.DefineProperty("name", &runtime.Property{
+		Value:        runtime.NewString("eval"),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
+	evalFnObj.DefineProperty("length", &runtime.Property{
+		Value:        runtime.NewNumber(1),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
 	env.Declare("eval", "var", runtime.NewObject(evalFnObj))
 
-	// register Function constructor
-	funcCtor := interp.makeFunctionConstructor(env)
-	env.Declare("Function", "var", funcCtor)
+	// Upgrade the builtins' Function constructor with actual implementation
+	// The builtins version has proper Function.prototype with call/apply/bind,
+	// but its Constructor is a stub. Replace just the Callable/Constructor.
+	if existing, _ := env.Get("Function"); existing != nil && existing != runtime.Undefined &&
+		existing.Type == runtime.TypeObject && existing.Object != nil {
+		implCtor := interp.makeFunctionConstructorImpl(env)
+		existing.Object.Callable = implCtor
+		existing.Object.Constructor = implCtor
+	} else {
+		funcCtor := interp.makeFunctionConstructor(env)
+		env.Declare("Function", "var", funcCtor)
+	}
 
 	// hoist var declarations and function declarations
+	interp.hoist(program.Statements, env)
+
+	var result *runtime.Value
+	for _, stmt := range program.Statements {
+		val, sig := interp.execStatement(stmt, env)
+		if sig.typ == sigThrow {
+			return nil, &jsError{value: sig.value}
+		}
+		if sig.typ == sigReturn {
+			return sig.value, nil
+		}
+		if val != nil {
+			result = val
+		}
+	}
+
+	if result == nil {
+		return runtime.Undefined, nil
+	}
+	return result, nil
+}
+
+// EvalGlobalScript evaluates source code in the global environment directly.
+// This is used for $262.evalScript which should evaluate as a global Script,
+// not as eval code. Let/const declarations persist in the global env.
+func (interp *Interpreter) EvalGlobalScript(source string) (*runtime.Value, error) {
+	p := parser.New(source)
+	program, errs := p.ParseProgram()
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("parse errors: %v", errs)
+	}
+
+	env := interp.global
 	interp.hoist(program.Statements, env)
 
 	var result *runtime.Value
@@ -965,7 +1036,7 @@ func (interp *Interpreter) makeConstructor(fe *ast.FunctionExpression, env *runt
 func (interp *Interpreter) getPropertyKey(key ast.Expression, computed bool, env *runtime.Environment) string {
 	if computed {
 		val, _ := interp.evalExpression(key, env)
-		return val.ToString()
+		return val.ToPropertyKey()
 	}
 	switch k := key.(type) {
 	case *ast.Identifier:
@@ -996,10 +1067,12 @@ func (interp *Interpreter) evalExpression(expr ast.Expression, env *runtime.Envi
 		return interp.evalIdentifier(e, env)
 	case *ast.ThisExpression:
 		val, err := env.Get("this")
-		if err != nil {
-			return runtime.Undefined, signal{}
+		if err != nil || val == nil || val == runtime.Undefined {
+			return interp.globalObject, signal{}
 		}
 		return val, signal{}
+	case *ast.RegExpLiteral:
+		return interp.evalRegExpLiteral(e, env)
 	case *ast.ArrayLiteral:
 		return interp.evalArrayLiteral(e, env)
 	case *ast.ObjectLiteral:
@@ -1060,6 +1133,20 @@ func (interp *Interpreter) evalIdentifier(e *ast.Identifier, env *runtime.Enviro
 		return nil, signal{typ: sigThrow, value: errorFromGoError(err, env)}
 	}
 	return val, signal{}
+}
+
+func (interp *Interpreter) evalRegExpLiteral(e *ast.RegExpLiteral, env *runtime.Environment) (*runtime.Value, signal) {
+	// Look up RegExp constructor and call it with new
+	regexpCtor, err := env.Get("RegExp")
+	if err != nil || regexpCtor == nil || regexpCtor.Type != runtime.TypeObject || regexpCtor.Object == nil || regexpCtor.Object.Constructor == nil {
+		return nil, signal{typ: sigThrow, value: makeErrorObject("TypeError", "RegExp is not defined", env)}
+	}
+	args := []*runtime.Value{runtime.NewString(e.Pattern), runtime.NewString(e.Flags)}
+	result, callErr := regexpCtor.Object.Constructor(regexpCtor, args)
+	if callErr != nil {
+		return nil, signal{typ: sigThrow, value: makeErrorObject("SyntaxError", callErr.Error(), env)}
+	}
+	return result, signal{}
 }
 
 func (interp *Interpreter) evalArrayLiteral(e *ast.ArrayLiteral, env *runtime.Environment) (*runtime.Value, signal) {
@@ -1177,9 +1264,14 @@ func (interp *Interpreter) createFunctionImpl(name *ast.Identifier, params []ast
 
 		if !isArrow {
 			fnEnv.Declare("this", "const", this)
-			// arguments object
-			argsArr := runtime.NewArrayObject(nil, args)
-			fnEnv.Declare("arguments", "var", runtime.NewObject(argsArr))
+			// arguments object - ordinary object with Object.prototype, not Array
+			argsObj := runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)
+			for i, a := range args {
+				argsObj.Set(fmt.Sprintf("%d", i), a)
+			}
+			argsObj.Set("length", runtime.NewNumber(float64(len(args))))
+			argsObj.Set("@@toStringTag", runtime.NewString("Arguments"))
+			fnEnv.Declare("arguments", "var", runtime.NewObject(argsObj))
 		}
 
 		// Only named function expressions get an immutable self-reference binding.
@@ -1205,11 +1297,33 @@ func (interp *Interpreter) createFunctionImpl(name *ast.Identifier, params []ast
 	}
 
 	fnObj := runtime.NewFunctionObject(nil, callable)
-	fnObj.Set("prototype", runtime.NewObject(runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)))
+	fnProto := runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)
+	fnProto.DefineProperty("constructor", &runtime.Property{
+		Value:        runtime.NewObject(fnObj),
+		Writable:     true,
+		Enumerable:   false,
+		Configurable: true,
+	})
+	fnObj.DefineProperty("prototype", &runtime.Property{
+		Value:        runtime.NewObject(fnProto),
+		Writable:     true,
+		Enumerable:   false,
+		Configurable: false,
+	})
 	if fnName != "" {
-		fnObj.Set("name", runtime.NewString(fnName))
+		fnObj.DefineProperty("name", &runtime.Property{
+			Value:        runtime.NewString(fnName),
+			Writable:     false,
+			Enumerable:   false,
+			Configurable: true,
+		})
 	}
-	fnObj.Set("length", runtime.NewNumber(float64(len(params))))
+	fnObj.DefineProperty("length", &runtime.Property{
+		Value:        runtime.NewNumber(float64(len(params))),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
 
 	return runtime.NewObject(fnObj)
 }
@@ -1251,7 +1365,13 @@ func (interp *Interpreter) createArrowFunction(e *ast.ArrowFunctionExpression, e
 	}
 
 	fnObj := runtime.NewFunctionObject(nil, callable)
-	fnObj.Set("length", runtime.NewNumber(float64(len(e.Params))))
+	fnObj.Internal = map[string]interface{}{"isArrow": true}
+	fnObj.DefineProperty("length", &runtime.Property{
+		Value:        runtime.NewNumber(float64(len(e.Params))),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
 	return runtime.NewObject(fnObj)
 }
 
@@ -1311,6 +1431,11 @@ func (interp *Interpreter) evalUnary(e *ast.UnaryExpression, env *runtime.Enviro
 			}
 			if objVal.Type == runtime.TypeObject && objVal.Object != nil {
 				key := interp.resolveMemberKey(member, env)
+				if prop, exists := objVal.Object.Properties[key]; exists {
+					if !prop.Configurable {
+						return runtime.False, signal{}
+					}
+				}
 				delete(objVal.Object.Properties, key)
 				return runtime.True, signal{}
 			}
@@ -1359,6 +1484,8 @@ func (interp *Interpreter) typeofValue(val *runtime.Value) *runtime.Value {
 			return runtime.NewString("function")
 		}
 		return runtime.NewString("object")
+	case runtime.TypeSymbol:
+		return runtime.NewString("symbol")
 	}
 	return runtime.NewString("undefined")
 }
@@ -1408,21 +1535,7 @@ func (interp *Interpreter) evalBinary(e *ast.BinaryExpression, env *runtime.Envi
 	case "*":
 		return runtime.NewNumber(left.ToNumber() * right.ToNumber()), signal{}
 	case "/":
-		rn := right.ToNumber()
-		if rn == 0 {
-			ln := left.ToNumber()
-			if math.IsNaN(ln) {
-				return runtime.NaN, signal{}
-			}
-			if ln == 0 {
-				return runtime.NaN, signal{}
-			}
-			if ln > 0 {
-				return runtime.PosInf, signal{}
-			}
-			return runtime.NegInf, signal{}
-		}
-		return runtime.NewNumber(left.ToNumber() / rn), signal{}
+		return runtime.NewNumber(left.ToNumber() / right.ToNumber()), signal{}
 	case "%":
 		rn := right.ToNumber()
 		if rn == 0 {
@@ -1730,7 +1843,7 @@ func (interp *Interpreter) assignToExpression(expr ast.Expression, val *runtime.
 func (interp *Interpreter) resolveMemberKey(e *ast.MemberExpression, env *runtime.Environment) string {
 	if e.Computed {
 		keyVal, _ := interp.evalExpression(e.Property, env)
-		return keyVal.ToString()
+		return keyVal.ToPropertyKey()
 	}
 	if ident, ok := e.Property.(*ast.Identifier); ok {
 		return ident.Value
@@ -1837,6 +1950,16 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 	args, argSig := interp.evalArguments(e.Arguments, env)
 	if argSig.typ != sigNone {
 		return nil, argSig
+	}
+
+	// In non-strict mode, plain function calls (not method calls) get the global
+	// object as `this` instead of undefined. Arrow functions are excluded because
+	// they don't bind their own `this` (they inherit from enclosing scope).
+	if (thisVal == nil || thisVal == runtime.Undefined) && callee.Object != nil {
+		isArrow := callee.Object.Internal != nil && callee.Object.Internal["isArrow"] != nil
+		if !isArrow {
+			thisVal = interp.globalObject
+		}
 	}
 
 	result, err := callee.Object.Callable(thisVal, args)
@@ -2155,11 +2278,6 @@ func (interp *Interpreter) evalMember(e *ast.MemberExpression, env *runtime.Envi
 			idx, err := strconv.Atoi(key)
 			if err == nil && idx >= 0 && idx < len(obj.Object.ArrayData) {
 				return obj.Object.ArrayData[idx], signal{}
-			}
-			// inline array methods (capture the array reference)
-			method := interp.getArrayMethod(obj, key)
-			if method != nil {
-				return method, signal{}
 			}
 		}
 
@@ -2626,7 +2744,9 @@ func (interp *Interpreter) evalCodeInEnv(code string, env *runtime.Environment) 
 		return nil, signal{typ: sigThrow, value: errObj}
 	}
 
-	interp.hoist(program.Statements, env)
+	// Use eval-specific hoisting: per B.3.3.3, Annex B block function hoisting
+	// in eval code should not skip names that are parameters in the enclosing function.
+	interp.hoistComprehensiveEval(program.Statements, env)
 
 	var result *runtime.Value
 	for _, stmt := range program.Statements {
@@ -2655,6 +2775,46 @@ func (interp *Interpreter) evalDirectEval(args []*runtime.Value, env *runtime.En
 	return interp.evalCodeInEnv(args[0].Str, env)
 }
 
+// makeFunctionConstructorImpl returns just the callable for the Function constructor.
+func (interp *Interpreter) makeFunctionConstructorImpl(env *runtime.Environment) runtime.CallableFunc {
+	return func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+		var paramStr, bodyStr string
+		if len(args) == 0 {
+			bodyStr = ""
+		} else if len(args) == 1 {
+			bodyStr = args[0].ToString()
+		} else {
+			params := make([]string, len(args)-1)
+			for i := 0; i < len(args)-1; i++ {
+				params[i] = args[i].ToString()
+			}
+			paramStr = strings.Join(params, ",")
+			bodyStr = args[len(args)-1].ToString()
+		}
+
+		source := "function anonymous(" + paramStr + "\n) {\n" + bodyStr + "\n}"
+		p := parser.New(source)
+		program, errs := p.ParseProgram()
+		if len(errs) > 0 {
+			errMsg := fmt.Sprintf("%v", errs[0])
+			errObj := makeErrorObject("SyntaxError", errMsg, env)
+			return nil, &jsError{value: errObj}
+		}
+
+		if len(program.Statements) == 0 {
+			return runtime.Undefined, nil
+		}
+
+		funcDecl, ok := program.Statements[0].(*ast.FunctionDeclaration)
+		if !ok {
+			return runtime.Undefined, nil
+		}
+
+		fnVal := interp.createFunction(funcDecl.Name, funcDecl.Params, funcDecl.Defaults, funcDecl.Rest, funcDecl.Body, env, false)
+		return fnVal, nil
+	}
+}
+
 // makeFunctionConstructor creates the global Function constructor.
 func (interp *Interpreter) makeFunctionConstructor(env *runtime.Environment) *runtime.Value {
 	ctor := func(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
@@ -2672,7 +2832,7 @@ func (interp *Interpreter) makeFunctionConstructor(env *runtime.Environment) *ru
 			bodyStr = args[len(args)-1].ToString()
 		}
 
-		source := "function anonymous(" + paramStr + ") { " + bodyStr + " }"
+		source := "function anonymous(" + paramStr + "\n) {\n" + bodyStr + "\n}"
 		p := parser.New(source)
 		program, errs := p.ParseProgram()
 		if len(errs) > 0 {
@@ -2697,8 +2857,23 @@ func (interp *Interpreter) makeFunctionConstructor(env *runtime.Environment) *ru
 
 	fnObj := runtime.NewFunctionObject(nil, ctor)
 	fnObj.Constructor = ctor
-	fnObj.Set("prototype", runtime.NewObject(runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)))
-	fnObj.Set("length", runtime.NewNumber(1))
-	fnObj.Set("name", runtime.NewString("Function"))
+	fnObj.DefineProperty("prototype", &runtime.Property{
+		Value:        runtime.NewObject(runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)),
+		Writable:     true,
+		Enumerable:   false,
+		Configurable: false,
+	})
+	fnObj.DefineProperty("length", &runtime.Property{
+		Value:        runtime.NewNumber(1),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
+	fnObj.DefineProperty("name", &runtime.Property{
+		Value:        runtime.NewString("Function"),
+		Writable:     false,
+		Enumerable:   false,
+		Configurable: true,
+	})
 	return runtime.NewObject(fnObj)
 }

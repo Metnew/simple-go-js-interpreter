@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/example/jsgo/ast"
 	"github.com/example/jsgo/lexer"
@@ -1528,7 +1529,12 @@ func (p *Parser) parseTemplateLiteral() *ast.TemplateLiteralExpr {
 }
 
 func (p *Parser) parseRegExpLiteral() ast.Expression {
-	lit := &ast.StringLiteral{Token: p.curToken, Value: p.curToken.Literal}
+	raw := p.curToken.Literal // e.g. "/pattern/flags"
+	// Find last '/' which separates pattern from flags
+	lastSlash := strings.LastIndex(raw, "/")
+	pattern := raw[1:lastSlash]
+	flags := raw[lastSlash+1:]
+	lit := &ast.RegExpLiteral{Token: p.curToken, Pattern: pattern, Flags: flags}
 	p.nextToken()
 	return lit
 }
