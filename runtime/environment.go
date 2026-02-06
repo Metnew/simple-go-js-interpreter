@@ -4,9 +4,10 @@ import "fmt"
 
 // Environment represents a lexical scope.
 type Environment struct {
-	store  map[string]*Binding
-	outer  *Environment
-	isBlock bool // true for block scopes (let/const), false for function scopes
+	store      map[string]*Binding
+	outer      *Environment
+	isBlock    bool // true for block scopes (let/const), false for function scopes
+	annexBNames map[string]bool // names hoisted by Annex B (block-level function decls)
 }
 
 type Binding struct {
@@ -86,7 +87,12 @@ func (e *Environment) SetInCurrentScope(name string, value *Value) {
 // DeclareVar declares a var binding only if the name doesn't already exist in this scope.
 // Used for Annex B block-level function hoisting: the name is hoisted as undefined
 // but must not overwrite existing bindings (var, let, const, or function).
+// Tracks the name as an Annex B hoisted name for runtime propagation checks.
 func (e *Environment) DeclareVar(name string) {
+	if e.annexBNames == nil {
+		e.annexBNames = make(map[string]bool)
+	}
+	e.annexBNames[name] = true
 	if _, exists := e.store[name]; exists {
 		return
 	}
@@ -96,6 +102,11 @@ func (e *Environment) DeclareVar(name string) {
 		Kind:     "var",
 		Declared: true,
 	}
+}
+
+// IsAnnexBHoisted returns true if the given name was Annex B hoisted in this scope.
+func (e *Environment) IsAnnexBHoisted(name string) bool {
+	return e.annexBNames != nil && e.annexBNames[name]
 }
 
 // GetFunctionScope walks up to find the nearest function scope (or global).
@@ -121,6 +132,36 @@ func (e *Environment) HasVarBinding(name string) bool {
 // IsBlock returns true if this is a block scope (not a function/program scope).
 func (e *Environment) IsBlock() bool {
 	return e.isBlock
+}
+
+// HasLexicalInEnclosingBlocks checks whether any block scope between this scope's
+// parent and the target scope (exclusive) has a lexical binding (let/const/function)
+// for the given name. Used to determine if Annex B propagation should be suppressed.
+func (e *Environment) HasLexicalInEnclosingBlocks(name string, target *Environment) bool {
+	for cur := e.outer; cur != nil && cur != target; cur = cur.outer {
+		if !cur.isBlock {
+			break
+		}
+		if binding, ok := cur.store[name]; ok {
+			if binding.Kind == "let" || binding.Kind == "const" || binding.Kind == "function" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ForEachBinding calls fn for each binding in the current scope.
+func (e *Environment) ForEachBinding(fn func(name string, kind string)) {
+	for name, binding := range e.store {
+		fn(name, binding.Kind)
+	}
+}
+
+// HasBinding returns true if this scope has a binding for the given name.
+func (e *Environment) HasBinding(name string) bool {
+	_, ok := e.store[name]
+	return ok
 }
 
 // Outer returns the parent environment.

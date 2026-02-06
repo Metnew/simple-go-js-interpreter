@@ -265,15 +265,19 @@ func (interp *Interpreter) execStatement(stmt ast.Statement, env *runtime.Enviro
 	case *ast.FunctionDeclaration:
 		// In function/program scope: fully hoisted already, nothing to do.
 		// In block scope (Annex B): the name was hoisted to the block scope,
-		// but we also need to propagate the value to the enclosing function scope
-		// (only if the function scope has a var/function binding for this name,
-		// i.e., the Annex B hoisting was not skipped due to lexical conflicts).
+		// but we also need to propagate the value to the enclosing function scope.
+		// Only propagate if:
+		// 1. The function scope has a var binding for this name
+		// 2. The name was actually Annex B hoisted (not skipped due to conflicts)
+		// 3. No enclosing block scope has a lexical binding for the same name
 		if env.IsBlock() {
 			fnVal := interp.createFunction(s.Name, s.Params, s.Defaults, s.Rest, s.Body, env, false)
 			env.SetInCurrentScope(s.Name.Value, fnVal)
 			funcScope := env.GetFunctionScope()
-			if funcScope != env && funcScope.HasVarBinding(s.Name.Value) {
-				funcScope.SetInCurrentScope(s.Name.Value, fnVal)
+			if funcScope != env && funcScope.IsAnnexBHoisted(s.Name.Value) {
+				if !env.HasLexicalInEnclosingBlocks(s.Name.Value, funcScope) {
+					funcScope.SetInCurrentScope(s.Name.Value, fnVal)
+				}
 			}
 		}
 		return nil, signal{}
@@ -785,7 +789,14 @@ func (interp *Interpreter) execTry(s *ast.TryStatement, env *runtime.Environment
 	if sig.typ == sigThrow && s.Handler != nil {
 		catchEnv := runtime.NewEnvironment(env, true)
 		if s.Handler.Param != nil {
-			interp.bindPattern(s.Handler.Param, sig.value, "let", catchEnv)
+			// Simple identifier catch params use "catch" kind to allow Annex B
+			// function hoisting through them (per B.3.5). Destructuring params
+			// use "let" kind which blocks Annex B hoisting.
+			catchKind := "let"
+			if _, isIdent := s.Handler.Param.(*ast.Identifier); isIdent {
+				catchKind = "catch"
+			}
+			interp.bindPattern(s.Handler.Param, sig.value, catchKind, catchEnv)
 		}
 		interp.hoist(s.Handler.Body.Statements, catchEnv)
 		var catchResult *runtime.Value
