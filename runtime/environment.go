@@ -83,6 +83,21 @@ func (e *Environment) SetInCurrentScope(name string, value *Value) {
 	}
 }
 
+// DeclareVar declares a var binding only if the name doesn't already exist in this scope.
+// Used for Annex B block-level function hoisting: the name is hoisted as undefined
+// but must not overwrite existing bindings (var, let, const, or function).
+func (e *Environment) DeclareVar(name string) {
+	if _, exists := e.store[name]; exists {
+		return
+	}
+	e.store[name] = &Binding{
+		Value:    Undefined,
+		Mutable:  true,
+		Kind:     "var",
+		Declared: true,
+	}
+}
+
 // GetFunctionScope walks up to find the nearest function scope (or global).
 func (e *Environment) GetFunctionScope() *Environment {
 	if !e.isBlock {
@@ -92,6 +107,20 @@ func (e *Environment) GetFunctionScope() *Environment {
 		return e.outer.GetFunctionScope()
 	}
 	return e
+}
+
+// HasVarBinding returns true if the given name has a var or function binding in this scope.
+// Used by Annex B to check whether propagating a block function to function scope is safe.
+func (e *Environment) HasVarBinding(name string) bool {
+	if binding, ok := e.store[name]; ok {
+		return binding.Kind == "var" || binding.Kind == "function"
+	}
+	return false
+}
+
+// IsBlock returns true if this is a block scope (not a function/program scope).
+func (e *Environment) IsBlock() bool {
+	return e.isBlock
 }
 
 // Outer returns the parent environment.

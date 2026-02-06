@@ -265,12 +265,14 @@ func (interp *Interpreter) execStatement(stmt ast.Statement, env *runtime.Enviro
 	case *ast.FunctionDeclaration:
 		// In function/program scope: fully hoisted already, nothing to do.
 		// In block scope (Annex B): the name was hoisted to the block scope,
-		// but we also need to propagate the value to the enclosing function scope.
+		// but we also need to propagate the value to the enclosing function scope
+		// (only if the function scope has a var/function binding for this name,
+		// i.e., the Annex B hoisting was not skipped due to lexical conflicts).
 		if env.IsBlock() {
 			fnVal := interp.createFunction(s.Name, s.Params, s.Defaults, s.Rest, s.Body, env, false)
 			env.SetInCurrentScope(s.Name.Value, fnVal)
 			funcScope := env.GetFunctionScope()
-			if funcScope != env {
+			if funcScope != env && funcScope.HasVarBinding(s.Name.Value) {
 				funcScope.SetInCurrentScope(s.Name.Value, fnVal)
 			}
 		}
@@ -716,6 +718,14 @@ func (interp *Interpreter) execSwitch(s *ast.SwitchStatement, env *runtime.Envir
 	}
 
 	switchEnv := runtime.NewEnvironment(env, true)
+
+	// Hoist function declarations from all cases into the switch block scope
+	var allCaseStmts []ast.Statement
+	for _, c := range s.Cases {
+		allCaseStmts = append(allCaseStmts, c.Consequent...)
+	}
+	interp.hoist(allCaseStmts, switchEnv)
+
 	matched := false
 	defaultIdx := -1
 
@@ -1140,6 +1150,10 @@ func (interp *Interpreter) evalObjectLiteral(e *ast.ObjectLiteral, env *runtime.
 }
 
 func (interp *Interpreter) createFunction(name *ast.Identifier, params []ast.Expression, defaults []ast.Expression, rest ast.Expression, body *ast.BlockStatement, env *runtime.Environment, isArrow bool) *runtime.Value {
+	return interp.createFunctionImpl(name, params, defaults, rest, body, env, isArrow, false)
+}
+
+func (interp *Interpreter) createFunctionImpl(name *ast.Identifier, params []ast.Expression, defaults []ast.Expression, rest ast.Expression, body *ast.BlockStatement, env *runtime.Environment, isArrow bool, isExpression bool) *runtime.Value {
 	closureEnv := env
 	var fnName string
 	if name != nil {
@@ -1157,7 +1171,9 @@ func (interp *Interpreter) createFunction(name *ast.Identifier, params []ast.Exp
 			fnEnv.Declare("arguments", "var", runtime.NewObject(argsArr))
 		}
 
-		if fnName != "" {
+		// Only named function expressions get an immutable self-reference binding.
+		// Function declarations do not - their name binds in the enclosing scope.
+		if fnName != "" && isExpression {
 			fnObj := runtime.NewFunctionObject(nil, callable)
 			fnEnv.Declare(fnName, "const", runtime.NewObject(fnObj))
 		}
@@ -1188,7 +1204,7 @@ func (interp *Interpreter) createFunction(name *ast.Identifier, params []ast.Exp
 }
 
 func (interp *Interpreter) createFunctionFromExpr(e *ast.FunctionExpression, env *runtime.Environment) *runtime.Value {
-	return interp.createFunction(e.Name, e.Params, e.Defaults, e.Rest, e.Body, env, false)
+	return interp.createFunctionImpl(e.Name, e.Params, e.Defaults, e.Rest, e.Body, env, false, true)
 }
 
 func (interp *Interpreter) createArrowFunction(e *ast.ArrowFunctionExpression, env *runtime.Environment) *runtime.Value {

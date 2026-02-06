@@ -32,9 +32,30 @@ func (interp *Interpreter) hoistComprehensive(stmts []ast.Statement, env *runtim
 
 	// Annex B: if this is a function/program scope (not a block scope),
 	// also hoist function declarations found inside blocks to the function scope.
+	// Per spec, skip names that would conflict with lexical (let/const) declarations.
 	if funcScope == env {
-		interp.collectBlockFuncDecls(stmts, env)
+		lexicalNames := interp.collectTopLevelLexicalNames(stmts)
+		interp.collectBlockFuncDecls(stmts, env, lexicalNames)
 	}
+}
+
+// collectTopLevelLexicalNames collects all let/const declared names at the top level
+// of a statement list. Used to prevent Annex B block-function hoisting from conflicting
+// with lexical declarations.
+func (interp *Interpreter) collectTopLevelLexicalNames(stmts []ast.Statement) map[string]bool {
+	names := make(map[string]bool)
+	for _, stmt := range stmts {
+		if vd, ok := stmt.(*ast.VariableDeclaration); ok {
+			if vd.Kind == "let" || vd.Kind == "const" {
+				for _, decl := range vd.Declarations {
+					for _, name := range interp.extractBindingNames(decl.Name) {
+						names[name] = true
+					}
+				}
+			}
+		}
+	}
+	return names
 }
 
 // collectVarDecls recursively walks all nested structures to find var declarations
@@ -128,75 +149,104 @@ func (interp *Interpreter) collectVarDeclsFromStmt(stmt ast.Statement, funcScope
 }
 
 // collectBlockFuncDecls walks into blocks/if/switch/try to find function declarations
-// and hoists them to the function scope (Annex B semantics for non-strict mode).
-func (interp *Interpreter) collectBlockFuncDecls(stmts []ast.Statement, env *runtime.Environment) {
+// and hoists their NAMES to the function scope as var (initialized to undefined).
+// Per Annex B semantics, the actual function value is NOT assigned here;
+// it gets assigned when the declaration is reached during execution.
+// Names in lexicalNames are skipped (they conflict with let/const in the function scope).
+func (interp *Interpreter) collectBlockFuncDecls(stmts []ast.Statement, env *runtime.Environment, lexicalNames map[string]bool) {
 	for _, stmt := range stmts {
-		interp.collectBlockFuncDeclsFromStmt(stmt, env)
+		interp.collectBlockFuncDeclsFromStmt(stmt, env, lexicalNames)
 	}
 }
 
-func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env *runtime.Environment) {
+func (interp *Interpreter) collectBlockFuncDeclsFromStmt(stmt ast.Statement, env *runtime.Environment, lexicalNames map[string]bool) {
 	switch s := stmt.(type) {
 	case *ast.BlockStatement:
 		for _, inner := range s.Statements {
 			if fd, ok := inner.(*ast.FunctionDeclaration); ok {
-				fnVal := interp.createFunction(fd.Name, fd.Params, fd.Defaults, fd.Rest, fd.Body, env, false)
-				env.SetInCurrentScope(fd.Name.Value, fnVal)
+				if !lexicalNames[fd.Name.Value] {
+					env.DeclareVar(fd.Name.Value)
+				}
 			}
-			interp.collectBlockFuncDeclsFromStmt(inner, env)
+			interp.collectBlockFuncDeclsFromStmt(inner, env, lexicalNames)
 		}
 	case *ast.IfStatement:
 		if s.Consequence != nil {
 			for _, inner := range s.Consequence.Statements {
 				if fd, ok := inner.(*ast.FunctionDeclaration); ok {
-					fnVal := interp.createFunction(fd.Name, fd.Params, fd.Defaults, fd.Rest, fd.Body, env, false)
-					env.SetInCurrentScope(fd.Name.Value, fnVal)
+					if !lexicalNames[fd.Name.Value] {
+						env.DeclareVar(fd.Name.Value)
+					}
 				}
-				interp.collectBlockFuncDeclsFromStmt(inner, env)
+				interp.collectBlockFuncDeclsFromStmt(inner, env, lexicalNames)
 			}
 		}
 		if s.Alternative != nil {
-			interp.collectBlockFuncDeclsFromStmt(s.Alternative, env)
+			interp.collectBlockFuncDeclsFromStmt(s.Alternative, env, lexicalNames)
 		}
 	case *ast.SwitchStatement:
 		for _, c := range s.Cases {
 			for _, inner := range c.Consequent {
 				if fd, ok := inner.(*ast.FunctionDeclaration); ok {
-					fnVal := interp.createFunction(fd.Name, fd.Params, fd.Defaults, fd.Rest, fd.Body, env, false)
-					env.SetInCurrentScope(fd.Name.Value, fnVal)
+					if !lexicalNames[fd.Name.Value] {
+						env.DeclareVar(fd.Name.Value)
+					}
 				}
-				interp.collectBlockFuncDeclsFromStmt(inner, env)
+				interp.collectBlockFuncDeclsFromStmt(inner, env, lexicalNames)
 			}
 		}
 	case *ast.TryStatement:
 		if s.Block != nil {
 			for _, inner := range s.Block.Statements {
 				if fd, ok := inner.(*ast.FunctionDeclaration); ok {
-					fnVal := interp.createFunction(fd.Name, fd.Params, fd.Defaults, fd.Rest, fd.Body, env, false)
-					env.SetInCurrentScope(fd.Name.Value, fnVal)
+					if !lexicalNames[fd.Name.Value] {
+						env.DeclareVar(fd.Name.Value)
+					}
 				}
-				interp.collectBlockFuncDeclsFromStmt(inner, env)
+				interp.collectBlockFuncDeclsFromStmt(inner, env, lexicalNames)
 			}
 		}
 		if s.Handler != nil && s.Handler.Body != nil {
 			for _, inner := range s.Handler.Body.Statements {
 				if fd, ok := inner.(*ast.FunctionDeclaration); ok {
-					fnVal := interp.createFunction(fd.Name, fd.Params, fd.Defaults, fd.Rest, fd.Body, env, false)
-					env.SetInCurrentScope(fd.Name.Value, fnVal)
+					if !lexicalNames[fd.Name.Value] {
+						env.DeclareVar(fd.Name.Value)
+					}
 				}
-				interp.collectBlockFuncDeclsFromStmt(inner, env)
+				interp.collectBlockFuncDeclsFromStmt(inner, env, lexicalNames)
 			}
 		}
 		if s.Finalizer != nil {
 			for _, inner := range s.Finalizer.Statements {
 				if fd, ok := inner.(*ast.FunctionDeclaration); ok {
-					fnVal := interp.createFunction(fd.Name, fd.Params, fd.Defaults, fd.Rest, fd.Body, env, false)
-					env.SetInCurrentScope(fd.Name.Value, fnVal)
+					if !lexicalNames[fd.Name.Value] {
+						env.DeclareVar(fd.Name.Value)
+					}
 				}
-				interp.collectBlockFuncDeclsFromStmt(inner, env)
+				interp.collectBlockFuncDeclsFromStmt(inner, env, lexicalNames)
 			}
 		}
+	case *ast.ForStatement:
+		if s.Body != nil {
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+		}
+	case *ast.ForInStatement:
+		if s.Body != nil {
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+		}
+	case *ast.ForOfStatement:
+		if s.Body != nil {
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+		}
+	case *ast.WhileStatement:
+		if s.Body != nil {
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+		}
+	case *ast.DoWhileStatement:
+		if s.Body != nil {
+			interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
+		}
 	case *ast.LabeledStatement:
-		interp.collectBlockFuncDeclsFromStmt(s.Body, env)
+		interp.collectBlockFuncDeclsFromStmt(s.Body, env, lexicalNames)
 	}
 }

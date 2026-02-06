@@ -1306,3 +1306,123 @@ func TestLogicalAssignment(t *testing.T) {
 		x;
 	`, 42)
 }
+
+// --- Block-scoped function declarations (Annex B) ---
+
+func TestBlockFunctionHoisting(t *testing.T) {
+	// Block function hoists name as undefined, assigns value when block executes
+	expectString(t, `
+		(function() {
+			var before = typeof f;
+			{ function f() { return 42; } }
+			var after = typeof f;
+			return before + " / " + after;
+		})();
+	`, "undefined / function")
+
+	// Block function value accessible after block
+	expectNumber(t, `
+		(function() {
+			{ function f() { return 42; } }
+			return f();
+		})();
+	`, 42)
+
+	// Multiple blocks with same function name
+	expectString(t, `
+		(function() {
+			{ function f() { return 1; } }
+			var r1 = f();
+			{ function f() { return 2; } }
+			var r2 = f();
+			return r1 + " / " + r2;
+		})();
+	`, "1 / 2")
+
+	// Only executed branch propagates
+	expectString(t, `
+		(function() {
+			if (true) { function f() { return 'yes'; } }
+			else { function f() { return 'no'; } }
+			return f();
+		})();
+	`, "yes")
+}
+
+func TestBlockFunctionMutable(t *testing.T) {
+	// Block function binding is mutable (not const)
+	expectString(t, `
+		(function() {
+			{ function f() { return 1; } f = 'reassigned'; }
+			return "ok";
+		})();
+	`, "ok")
+
+	// Function declaration name is mutable inside function body
+	expectNumber(t, `
+		(function() {
+			function f() { f = 123; return f; }
+			return f();
+		})();
+	`, 123)
+}
+
+func TestBlockFunctionVarCoexistence(t *testing.T) {
+	// var and block function with same name should not conflict
+	expectString(t, `
+		(function() {
+			var f;
+			{ function f() { return 1; } }
+			return typeof f;
+		})();
+	`, "function")
+
+	// var with value, block function overwrites after block
+	expectString(t, `
+		(function() {
+			var f = 1;
+			{ function f() { return 2; } }
+			return typeof f;
+		})();
+	`, "function")
+}
+
+func TestBlockFunctionLexicalConflict(t *testing.T) {
+	// let in function scope prevents Annex B hoisting
+	expectNumber(t, `
+		(function() {
+			let f = 123;
+			{ function f() {} }
+			return f;
+		})();
+	`, 123)
+}
+
+func TestSwitchFunctionDeclaration(t *testing.T) {
+	// Function in switch case hoists to function scope
+	expectString(t, `
+		(function() {
+			switch (1) { default: function f() { return 'decl'; } }
+			return typeof f;
+		})();
+	`, "function")
+
+	// Function in switch, body can assign to name
+	expectNumber(t, `
+		(function() {
+			switch (1) { default: function f() { f = 123; return f; } }
+			return f();
+		})();
+	`, 123)
+}
+
+func TestNamedFunctionExpressionImmutable(t *testing.T) {
+	// Named function expression has immutable self-reference
+	expectString(t, `
+		var g = function f() {
+			try { f = 123; } catch(e) {}
+			return typeof f;
+		};
+		g();
+	`, "function")
+}
