@@ -93,6 +93,9 @@ func AbstractEquals(a, b *Value) bool {
 
 // NewArrayObject creates an array object from values.
 func NewArrayObject(proto *Object, elements []*Value) *Object {
+	if proto == nil {
+		proto = DefaultArrayPrototype
+	}
 	obj := &Object{
 		OType:      ObjTypeArray,
 		Properties: make(map[string]*Property),
@@ -111,6 +114,22 @@ var DefaultFunctionPrototype *Object
 // DefaultObjectPrototype is set by builtins.RegisterAll so that newly created
 // ordinary objects (e.g., function .prototype properties) inherit from Object.prototype.
 var DefaultObjectPrototype *Object
+
+// DefaultArrayPrototype is set by builtins.RegisterAll so that array literals
+// created in the interpreter inherit Array.prototype methods.
+var DefaultArrayPrototype *Object
+
+// DefaultStringPrototype is set by builtins.RegisterAll so that string
+// primitive method calls can look up String.prototype methods.
+var DefaultStringPrototype *Object
+
+// DefaultNumberPrototype is set by builtins.RegisterAll so that number
+// primitive method calls can look up Number.prototype methods.
+var DefaultNumberPrototype *Object
+
+// DefaultBooleanPrototype is set by builtins.RegisterAll so that boolean
+// primitive method calls can look up Boolean.prototype methods.
+var DefaultBooleanPrototype *Object
 
 // NewFunctionObject creates a function object.
 func NewFunctionObject(proto *Object, callable CallableFunc) *Object {

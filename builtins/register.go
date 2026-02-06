@@ -26,20 +26,24 @@ func RegisterAll(env *runtime.Environment, globalObj *runtime.Object) {
 	setFuncPrototypeRecursive(functionCtor)
 
 	// 3. Array
-	arrayCtor, _ := createArrayConstructor(objProto)
+	arrayCtor, arrayProto := createArrayConstructor(objProto)
 	env.Declare("Array", "var", runtime.NewObject(arrayCtor))
+	runtime.DefaultArrayPrototype = arrayProto
 
 	// 4. String
-	stringCtor, _ := createStringConstructor(objProto)
+	stringCtor, stringProto := createStringConstructor(objProto)
 	env.Declare("String", "var", runtime.NewObject(stringCtor))
+	runtime.DefaultStringPrototype = stringProto
 
 	// 5. Number
-	numberCtor, _ := createNumberConstructor(objProto)
+	numberCtor, numberProto := createNumberConstructor(objProto)
 	env.Declare("Number", "var", runtime.NewObject(numberCtor))
+	runtime.DefaultNumberPrototype = numberProto
 
 	// 6. Boolean
-	booleanCtor, _ := createBooleanConstructor(objProto)
+	booleanCtor, booleanProto := createBooleanConstructor(objProto)
 	env.Declare("Boolean", "var", runtime.NewObject(booleanCtor))
+	runtime.DefaultBooleanPrototype = booleanProto
 
 	// 7. Symbol
 	symbolCtor := createSymbolConstructor(objProto)

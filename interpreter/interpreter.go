@@ -263,7 +263,17 @@ func (interp *Interpreter) execStatement(stmt ast.Statement, env *runtime.Enviro
 	case *ast.TryStatement:
 		return interp.execTry(s, env)
 	case *ast.FunctionDeclaration:
-		// already hoisted
+		// In function/program scope: fully hoisted already, nothing to do.
+		// In block scope (Annex B): the name was hoisted to the block scope,
+		// but we also need to propagate the value to the enclosing function scope.
+		if env.IsBlock() {
+			fnVal := interp.createFunction(s.Name, s.Params, s.Defaults, s.Rest, s.Body, env, false)
+			env.SetInCurrentScope(s.Name.Value, fnVal)
+			funcScope := env.GetFunctionScope()
+			if funcScope != env {
+				funcScope.SetInCurrentScope(s.Name.Value, fnVal)
+			}
+		}
 		return nil, signal{}
 	case *ast.ClassDeclaration:
 		return interp.execClassDecl(s, env)
@@ -1059,7 +1069,7 @@ func (interp *Interpreter) evalArrayLiteral(e *ast.ArrayLiteral, env *runtime.En
 }
 
 func (interp *Interpreter) evalObjectLiteral(e *ast.ObjectLiteral, env *runtime.Environment) (*runtime.Value, signal) {
-	obj := runtime.NewOrdinaryObject(nil)
+	obj := runtime.NewOrdinaryObject(runtime.DefaultObjectPrototype)
 	for _, prop := range e.Properties {
 		if spread, ok := prop.Key.(*ast.SpreadElement); ok {
 			srcVal, sig := interp.evalExpression(spread.Argument, env)
@@ -1741,9 +1751,9 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 		if sig.typ != sigNone {
 			return nil, sig
 		}
+		key := interp.resolveMemberKey(member, env)
 		if thisVal.Type == runtime.TypeObject && thisVal.Object != nil {
-			key := interp.resolveMemberKey(member, env)
-			// Check array methods first
+			// Check inline array methods first (they capture the array reference)
 			if thisVal.Object.OType == runtime.ObjTypeArray {
 				method := interp.getArrayMethod(thisVal, key)
 				if method != nil {
@@ -1755,7 +1765,26 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 				callee = thisVal.Object.Get(key)
 			}
 		} else if thisVal.Type == runtime.TypeString {
+			// Try inline string methods first (they capture the string value)
 			callee = interp.getStringMethod(thisVal, member, env)
+			// Fall back to String.prototype
+			if (callee == nil || callee.Type == runtime.TypeUndefined) && runtime.DefaultStringPrototype != nil {
+				callee = runtime.DefaultStringPrototype.Get(key)
+			}
+		} else if thisVal.Type == runtime.TypeNumber {
+			// Look up on Number.prototype
+			if runtime.DefaultNumberPrototype != nil {
+				callee = runtime.DefaultNumberPrototype.Get(key)
+			} else {
+				callee = runtime.Undefined
+			}
+		} else if thisVal.Type == runtime.TypeBoolean {
+			// Look up on Boolean.prototype
+			if runtime.DefaultBooleanPrototype != nil {
+				callee = runtime.DefaultBooleanPrototype.Get(key)
+			} else {
+				callee = runtime.Undefined
+			}
 		} else {
 			callee = runtime.Undefined
 		}
@@ -1771,6 +1800,8 @@ func (interp *Interpreter) evalCall(e *ast.CallExpression, env *runtime.Environm
 		name := ""
 		if ident, ok := e.Callee.(*ast.Identifier); ok {
 			name = ident.Value
+		} else if member, ok := e.Callee.(*ast.MemberExpression); ok {
+			name = interp.resolveMemberKey(member, env)
 		}
 		return nil, signal{typ: sigThrow, value: makeErrorObject("TypeError", fmt.Sprintf("%s is not a function", name), env)}
 	}
@@ -2064,7 +2095,26 @@ func (interp *Interpreter) evalMember(e *ast.MemberExpression, env *runtime.Envi
 			return runtime.NewNumber(float64(len(obj.Str))), signal{}
 		}
 		methodVal := interp.getStringMethod(obj, e, env)
+		if (methodVal == nil || methodVal.Type == runtime.TypeUndefined) && runtime.DefaultStringPrototype != nil {
+			methodVal = runtime.DefaultStringPrototype.Get(key)
+		}
 		return methodVal, signal{}
+	}
+
+	if obj.Type == runtime.TypeNumber {
+		key := interp.resolveMemberKey(e, env)
+		if runtime.DefaultNumberPrototype != nil {
+			return runtime.DefaultNumberPrototype.Get(key), signal{}
+		}
+		return runtime.Undefined, signal{}
+	}
+
+	if obj.Type == runtime.TypeBoolean {
+		key := interp.resolveMemberKey(e, env)
+		if runtime.DefaultBooleanPrototype != nil {
+			return runtime.DefaultBooleanPrototype.Get(key), signal{}
+		}
+		return runtime.Undefined, signal{}
 	}
 
 	if obj.Type == runtime.TypeObject && obj.Object != nil {
@@ -2079,7 +2129,7 @@ func (interp *Interpreter) evalMember(e *ast.MemberExpression, env *runtime.Envi
 			if err == nil && idx >= 0 && idx < len(obj.Object.ArrayData) {
 				return obj.Object.ArrayData[idx], signal{}
 			}
-			// array methods
+			// inline array methods (capture the array reference)
 			method := interp.getArrayMethod(obj, key)
 			if method != nil {
 				return method, signal{}
