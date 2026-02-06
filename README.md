@@ -174,3 +174,74 @@ go test ./...
 ├── test262/             # Test262 test suite (submodule)
 └── Makefile
 ```
+
+## Security Review
+
+> This engine is a learning/research project. It is **not hardened for untrusted input**. Do not use it to execute untrusted JavaScript in production.
+
+### Critical
+
+| # | Issue | Location |
+|---|-------|----------|
+| 1 | **No recursion depth limit** -- recursive JS functions or deeply nested AST cause Go stack overflow, crashing the process. CLI has no `recover()`. | `interpreter.go` (no depth tracking), `parser.go` (recursive descent) |
+| 2 | **No infinite loop protection in CLI** -- `while(true){}` hangs forever. Test runner has 5s timeout, CLI has none. | `cmd/jsgo/main.go:75` |
+| 3 | **Prototype chain cycles** -- `Object.setPrototypeOf` has no cycle detection. Creating `a->b->a` causes infinite loop in `Object.Get()`. | `builtins/object.go:291`, `runtime/value.go:260` |
+
+### High
+
+| # | Issue | Location |
+|---|-------|----------|
+| 4 | **`Object.freeze`/`seal` don't prevent new properties** -- `Set()` creates new properties unconditionally, never checks extensibility/frozen flags. | `runtime/value.go:286-291` |
+| 5 | **`String.prototype.repeat()` OOM** -- no upper bound on count. `"a".repeat(1e15)` attempts terabyte allocation. Same for `padStart`/`padEnd`. | `builtins/string.go:372-422` |
+| 6 | **`Array(n)` unbounded allocation** -- `Array(2147483647)` allocates multi-GB slice. Only checks `n < 0`. | `builtins/array.go:83-93` |
+| 7 | **`lastIndexOf` panic** -- `s[:pos+len(search)]` causes out-of-bounds panic when search string is longer than remaining string. | `builtins/string.go:179` |
+| 8 | **Nil pointer panic in `resolveMemberKey`** -- if computed key expression throws, `keyVal` is nil, `keyVal.ToPropertyKey()` panics. | `interpreter.go:1845-1846` |
+| 9 | **WeakMap/WeakSet are not weak** -- uses `map[*runtime.Object]*runtime.Value`, Go GC cannot collect entries. Memory leak, not weak reference semantics. | `builtins/map_set.go:420-426` |
+| 10 | **Proxy traps never invoked** -- constructor stores handler but `Get()`/`Set()` never check `ObjTypeProxy`. Proxy is completely inert. | `builtins/proxy.go:15-31` |
+
+### Medium
+
+| # | Issue | Location |
+|---|-------|----------|
+| 11 | **JSON.parse unbounded recursion** -- deeply nested JSON causes stack overflow in both `json.Unmarshal` and `goToJSValue`. | `builtins/json.go:24,37` |
+| 12 | **JSON.stringify no cycle detection** -- circular object references cause infinite recursion. | `builtins/json.go:133` |
+| 13 | **Getter/setter infinite loops** -- no re-entrancy guard. `get x() { return this.x }` recurses infinitely. | `runtime/value.go:254-256` |
+| 14 | **Reflect.deleteProperty ignores configurable** -- deletes directly from Properties map without checking `prop.Configurable`. | `builtins/proxy.go:77-88` |
+| 15 | **Null byte truncates source** -- `l.ch == 0` at main token switch is sole EOF check. Embedded U+0000 causes premature EOF, hiding trailing code. | `lexer/lexer.go:181` |
+| 16 | **Map/Set O(n) linear scan** -- `findMapEntry` iterates all entries. Inserting N keys is O(n^2). 100k entries = very slow. | `builtins/map_set.go:61-68` |
+| 17 | **Unchecked type assertions on Internal map** -- `v.(bool)` without comma-ok form can panic if Internal slot has wrong type. | `builtins/object.go:338,351`, `number.go:57`, `boolean.go:34` |
+| 18 | **Synchronous Promise execution** -- `.then()` handlers run inline, breaking the async guarantee. Can cause unexpected reentrancy. | `builtins/promise.go:159-160` |
+| 19 | **Implicit global creation** -- assignment to undeclared variable silently creates global binding instead of throwing ReferenceError. | `interpreter.go:1814-1817` |
+| 20 | **No regex pattern size limit** -- extremely large pattern strings can exhaust memory during compilation. | `builtins/regexp.go:143` |
+
+### Low / Informational
+
+| # | Issue | Location |
+|---|-------|----------|
+| 21 | **Symbol.Key() leaks Go heap addresses** -- `fmt.Sprintf("@@sym(%s)@%p", ...)` embeds pointer address in property key strings observable via `getOwnPropertyNames`. | `runtime/value.go:167` |
+| 22 | **`__proto__` not implemented as accessor** -- spec deviation, `obj.__proto__` creates a data property instead of modifying prototype. | `runtime/value.go:267` |
+| 23 | **`decodeURI` decodes reserved characters** -- uses `url.PathUnescape` which doesn't preserve `;/?:@&=+$#`. | `builtins/globals.go:153-173` |
+| 24 | **Annex B HTML methods don't escape content** -- `"<script>".bold()` produces `<b><script></b>`. XSS if output rendered in HTML. (Matches spec.) | `builtins/string.go:558-591` |
+| 25 | **`arrayCopyWithin` OOB** -- `copy(temp, obj.ArrayData[start:start+count])` can panic if bounds not properly clamped. | `builtins/array.go:681` |
+| 26 | **`toInt32`/`toUint32` undefined behavior** -- Go's `int64(float64)` for out-of-range values is implementation-defined. | `builtins/helpers.go:232-246` |
+
+### Recommendations
+
+**Immediate (security-critical):**
+1. Add a call stack depth counter (e.g., max 10,000) in the interpreter and parser
+2. Add `recover()` to the CLI's `main()`, or run eval in a goroutine with timeout
+3. Add cycle detection in `Object.setPrototypeOf` (walk chain to check for target)
+4. Cap `String.repeat`/`padStart`/`padEnd` and `Array(n)` to reasonable max (e.g., 2^28)
+5. Fix `lastIndexOf` bounds: clamp `pos + len(search)` to `len(s)`
+
+**Short-term:**
+6. Track extensibility (`[[IsExtensible]]`) and check in `Set()`/`DefineProperty`
+7. Add cycle detection in `JSON.stringify`
+8. Check for nil `keyVal` in `resolveMemberKey` before calling methods on it
+9. Fix null byte in main lexer token switch (same pattern as regex fix: `l.ch == 0 && l.pos >= len(l.input)`)
+
+**Longer-term:**
+10. Replace Map/Set linear scan with hash-based lookup
+11. Implement Proxy traps or remove Proxy support
+12. Implement proper weak references for WeakMap/WeakSet (requires finalizers or epoch-based approach)
+13. Add microtask queue for Promise async semantics
