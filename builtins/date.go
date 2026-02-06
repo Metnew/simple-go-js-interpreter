@@ -53,6 +53,11 @@ func createDateConstructor(objProto *runtime.Object) (*runtime.Object, *runtime.
 	setMethod(proto, "setMilliseconds", 1, dateSetMilliseconds)
 	setMethod(proto, "toUTCString", 0, dateToUTCString)
 
+	// Annex B methods
+	setMethod(proto, "getYear", 0, dateGetYear)
+	setMethod(proto, "setYear", 1, dateSetYear)
+	setMethod(proto, "toGMTString", 0, dateToUTCString) // toGMTString is an alias for toUTCString
+
 	// Constructor: Date() as function returns string, new Date() creates object
 	ctor := newFuncObject("Date", 7, dateCall)
 	ctor.Constructor = dateConstruct
@@ -502,6 +507,40 @@ func dateSetMilliseconds(this *runtime.Value, args []*runtime.Value) (*runtime.V
 	t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), ms*1e6, t.Location())
 	if this.Type == runtime.TypeObject && this.Object != nil {
 		this.Object.Internal["DateValue"] = t
+	}
+	return runtime.NewNumber(float64(t.UnixMilli())), nil
+}
+
+// Annex B methods
+
+func dateGetYear(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+	t, inv := getDateValue(this)
+	if inv {
+		return runtime.NaN, nil
+	}
+	return runtime.NewNumber(float64(t.Year() - 1900)), nil
+}
+
+func dateSetYear(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+	t, inv := getDateValue(this)
+	if inv {
+		t = time.Date(1900, time.January, 1, 0, 0, 0, 0, time.Local)
+	}
+	yearArg := toNumber(argAt(args, 0))
+	if math.IsNaN(yearArg) {
+		if this.Type == runtime.TypeObject && this.Object != nil {
+			this.Object.Internal["DateInvalid"] = true
+		}
+		return runtime.NaN, nil
+	}
+	year := int(yearArg)
+	if year >= 0 && year <= 99 {
+		year += 1900
+	}
+	t = time.Date(year, t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	if this.Type == runtime.TypeObject && this.Object != nil {
+		this.Object.Internal["DateValue"] = t
+		this.Object.Internal["DateInvalid"] = false
 	}
 	return runtime.NewNumber(float64(t.UnixMilli())), nil
 }

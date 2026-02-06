@@ -18,6 +18,7 @@ func createRegExpConstructor(objProto *runtime.Object) (*runtime.Object, *runtim
 	setMethod(proto, "test", 1, regexpTest)
 	setMethod(proto, "exec", 1, regexpExec)
 	setMethod(proto, "toString", 0, regexpToString)
+	setMethod(proto, "compile", 2, regexpCompile)
 
 	ctor := newFuncObject("RegExp", 2, regexpConstructorCall)
 	ctor.Constructor = regexpConstructorCall
@@ -119,6 +120,52 @@ func regexpExec(this *runtime.Value, args []*runtime.Value) (*runtime.Value, err
 	result.Set("index", runtime.NewNumber(float64(match[0])))
 	result.Set("input", runtime.NewString(s))
 	return runtime.NewObject(result), nil
+}
+
+func regexpCompile(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
+	obj := toObject(this)
+	if obj == nil {
+		return nil, fmt.Errorf("TypeError: RegExp.prototype.compile called on incompatible receiver")
+	}
+
+	pattern := ""
+	flags := ""
+	if len(args) > 0 && args[0].Type != runtime.TypeUndefined {
+		pattern = args[0].ToString()
+	}
+	if len(args) > 1 && args[1].Type != runtime.TypeUndefined {
+		flags = args[1].ToString()
+	}
+
+	goPattern := jsRegexpToGo(pattern)
+	if strings.Contains(flags, "i") {
+		goPattern = "(?i)" + goPattern
+	}
+	if strings.Contains(flags, "s") {
+		goPattern = "(?s)" + goPattern
+	}
+	re, err := regexp.Compile(goPattern)
+	if err != nil {
+		return nil, fmt.Errorf("SyntaxError: Invalid regular expression: %s", err)
+	}
+
+	if obj.Internal == nil {
+		obj.Internal = make(map[string]interface{})
+	}
+	obj.Internal["regexp"] = re
+	obj.Internal["pattern"] = pattern
+	obj.Internal["flags"] = flags
+
+	obj.Set("source", runtime.NewString(pattern))
+	obj.Set("flags", runtime.NewString(flags))
+	obj.Set("global", runtime.NewBool(strings.Contains(flags, "g")))
+	obj.Set("ignoreCase", runtime.NewBool(strings.Contains(flags, "i")))
+	obj.Set("multiline", runtime.NewBool(strings.Contains(flags, "m")))
+	obj.Set("sticky", runtime.NewBool(strings.Contains(flags, "y")))
+	obj.Set("unicode", runtime.NewBool(strings.Contains(flags, "u")))
+	obj.Set("lastIndex", runtime.NewNumber(0))
+
+	return this, nil
 }
 
 func regexpToString(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
