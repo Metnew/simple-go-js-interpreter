@@ -193,6 +193,14 @@ type Property struct {
 	Enumerable   bool
 	Configurable bool
 	IsAccessor   bool
+	// Has* fields track which attributes were explicitly specified in a descriptor.
+	// Used by defineProperty merging logic.
+	HasValue        bool
+	HasWritable     bool
+	HasEnumerable   bool
+	HasConfigurable bool
+	HasGet          bool
+	HasSet          bool
 }
 
 // CallableFunc is the Go function signature for JS callable objects.

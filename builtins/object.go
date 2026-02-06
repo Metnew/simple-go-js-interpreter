@@ -202,36 +202,48 @@ func objectCreate(this *runtime.Value, args []*runtime.Value) (*runtime.Value, e
 	}
 	obj := runtime.NewOrdinaryObject(proto)
 	if len(args) > 1 && args[1].Type == runtime.TypeObject {
-		definePropertiesFromDescriptors(obj, args[1].Object)
+		if err := definePropertiesFromDescriptors(obj, args[1].Object); err != nil {
+			return runtime.Undefined, err
+		}
 	}
 	return runtime.NewObject(obj), nil
 }
 
 func objectDefineProperty(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
-	obj := toObject(argAt(args, 0))
-	if obj == nil {
+	arg0 := argAt(args, 0)
+	if arg0.Type != runtime.TypeObject || arg0.Object == nil {
 		return runtime.Undefined, fmt.Errorf("TypeError: Object.defineProperty called on non-object")
 	}
+	obj := arg0.Object
 	name := argAt(args, 1).ToString()
-	desc := toObject(argAt(args, 2))
-	if desc == nil {
+	descArg := argAt(args, 2)
+	if descArg.Type != runtime.TypeObject || descArg.Object == nil {
 		return runtime.Undefined, fmt.Errorf("TypeError: Property description must be an object")
 	}
-	prop := descriptorToProperty(desc)
-	obj.DefineProperty(name, prop)
+	desc, err := descriptorToProperty(descArg.Object)
+	if err != nil {
+		return runtime.Undefined, err
+	}
+	if err := validateDefineOwnProperty(obj, name, desc); err != nil {
+		return runtime.Undefined, err
+	}
+	mergeAndDefineProperty(obj, name, desc)
 	return args[0], nil
 }
 
 func objectDefineProperties(this *runtime.Value, args []*runtime.Value) (*runtime.Value, error) {
-	obj := toObject(argAt(args, 0))
-	if obj == nil {
+	arg0 := argAt(args, 0)
+	if arg0.Type != runtime.TypeObject || arg0.Object == nil {
 		return runtime.Undefined, fmt.Errorf("TypeError: Object.defineProperties called on non-object")
 	}
+	obj := arg0.Object
 	props := toObject(argAt(args, 1))
 	if props == nil {
 		return args[0], nil
 	}
-	definePropertiesFromDescriptors(obj, props)
+	if err := definePropertiesFromDescriptors(obj, props); err != nil {
+		return runtime.Undefined, err
+	}
 	return args[0], nil
 }
 
@@ -420,31 +432,219 @@ func createValueArray(vals []*runtime.Value) *runtime.Value {
 	return runtime.NewObject(arr)
 }
 
-func descriptorToProperty(desc *runtime.Object) *runtime.Property {
+func descriptorToProperty(desc *runtime.Object) (*runtime.Property, error) {
 	prop := &runtime.Property{}
-	if v := desc.Get("value"); v != runtime.Undefined {
+
+	hasValue := desc.HasProperty("value")
+	hasWritable := desc.HasProperty("writable")
+	hasGet := desc.HasProperty("get")
+	hasSet := desc.HasProperty("set")
+
+	// Check for mixed accessor + data descriptor (spec 8.10.5 step 9)
+	isAccessorDesc := hasGet || hasSet
+	isDataDesc := hasValue || hasWritable
+	if isAccessorDesc && isDataDesc {
+		return nil, fmt.Errorf("TypeError: Invalid property descriptor. Cannot both specify accessors and a value or writable attribute")
+	}
+
+	if hasValue {
+		v := desc.Get("value")
+		if v == nil {
+			v = runtime.Undefined
+		}
 		prop.Value = v
+		prop.HasValue = true
+	}
+	if hasWritable {
+		v := desc.Get("writable")
+		if v != nil {
+			prop.Writable = v.ToBoolean()
+		}
+		prop.HasWritable = true
+	}
+	if desc.HasProperty("enumerable") {
+		v := desc.Get("enumerable")
+		if v != nil {
+			prop.Enumerable = v.ToBoolean()
+		}
+		prop.HasEnumerable = true
+	}
+	if desc.HasProperty("configurable") {
+		v := desc.Get("configurable")
+		if v != nil {
+			prop.Configurable = v.ToBoolean()
+		}
+		prop.HasConfigurable = true
+	}
+	if hasGet {
+		v := desc.Get("get")
+		if v == nil {
+			v = runtime.Undefined
+		}
+		if v != runtime.Undefined {
+			if v.Type != runtime.TypeObject || v.Object == nil || v.Object.Callable == nil {
+				return nil, fmt.Errorf("TypeError: Getter must be a function")
+			}
+			prop.Getter = v
+		}
+		prop.IsAccessor = true
+		prop.HasGet = true
+	}
+	if hasSet {
+		v := desc.Get("set")
+		if v == nil {
+			v = runtime.Undefined
+		}
+		if v != runtime.Undefined {
+			if v.Type != runtime.TypeObject || v.Object == nil || v.Object.Callable == nil {
+				return nil, fmt.Errorf("TypeError: Setter must be a function")
+			}
+			prop.Setter = v
+		}
+		prop.IsAccessor = true
+		prop.HasSet = true
+	}
+	return prop, nil
+}
+
+// mergeAndDefineProperty merges a new property descriptor with an existing one
+// (if any) and sets the result on the object. Implements ES5 8.12.9 steps 4-12.
+func mergeAndDefineProperty(obj *runtime.Object, name string, desc *runtime.Property) {
+	current, exists := obj.Properties[name]
+	if !exists {
+		// New property: fill in defaults for unspecified attributes
+		prop := &runtime.Property{}
+		if desc.IsAccessor {
+			prop.IsAccessor = true
+			prop.Getter = desc.Getter
+			prop.Setter = desc.Setter
+		} else {
+			if desc.HasValue {
+				prop.Value = desc.Value
+			} else {
+				prop.Value = runtime.Undefined
+			}
+			prop.Writable = desc.Writable
+		}
+		prop.Enumerable = desc.Enumerable
+		prop.Configurable = desc.Configurable
+		obj.DefineProperty(name, prop)
+		return
+	}
+
+	// Existing property: merge only the specified attributes from desc into current.
+	if desc.IsAccessor && !current.IsAccessor {
+		// Converting data to accessor
+		current.IsAccessor = true
+		current.Value = nil
+		current.Writable = false
+		if desc.HasGet {
+			current.Getter = desc.Getter
+		}
+		if desc.HasSet {
+			current.Setter = desc.Setter
+		}
+	} else if !desc.IsAccessor && current.IsAccessor && (desc.HasValue || desc.HasWritable) {
+		// Converting accessor to data
+		current.IsAccessor = false
+		current.Getter = nil
+		current.Setter = nil
+		if desc.HasValue {
+			current.Value = desc.Value
+		} else {
+			current.Value = runtime.Undefined
+		}
+		if desc.HasWritable {
+			current.Writable = desc.Writable
+		} else {
+			current.Writable = false
+		}
+	} else if desc.IsAccessor {
+		// Both accessor: update only specified get/set
+		if desc.HasGet {
+			current.Getter = desc.Getter
+		}
+		if desc.HasSet {
+			current.Setter = desc.Setter
+		}
 	} else {
-		prop.Value = runtime.Undefined
+		// Both data: update only specified value/writable
+		if desc.HasValue {
+			current.Value = desc.Value
+		}
+		if desc.HasWritable {
+			current.Writable = desc.Writable
+		}
 	}
-	if v := desc.Get("writable"); v != runtime.Undefined {
-		prop.Writable = v.ToBoolean()
+	if desc.HasEnumerable {
+		current.Enumerable = desc.Enumerable
 	}
-	if v := desc.Get("enumerable"); v != runtime.Undefined {
-		prop.Enumerable = v.ToBoolean()
+	if desc.HasConfigurable {
+		current.Configurable = desc.Configurable
 	}
-	if v := desc.Get("configurable"); v != runtime.Undefined {
-		prop.Configurable = v.ToBoolean()
+}
+
+// validateDefineOwnProperty implements the [[DefineOwnProperty]] validation
+// per ES5 8.12.9. It checks if redefining a property is allowed.
+func validateDefineOwnProperty(obj *runtime.Object, name string, desc *runtime.Property) error {
+	current, exists := obj.Properties[name]
+	if !exists {
+		return nil
 	}
-	if v := desc.Get("get"); v != runtime.Undefined && v.Type == runtime.TypeObject {
-		prop.Getter = v
-		prop.IsAccessor = true
+
+	// If current property is configurable, any change is allowed
+	if current.Configurable {
+		return nil
 	}
-	if v := desc.Get("set"); v != runtime.Undefined && v.Type == runtime.TypeObject {
-		prop.Setter = v
-		prop.IsAccessor = true
+
+	// Current is non-configurable.
+
+	// Can't make it configurable (step 7a)
+	if desc.HasConfigurable && desc.Configurable {
+		return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
 	}
-	return prop
+
+	// Check enumerable change on non-configurable (step 7b)
+	if desc.HasEnumerable && desc.Enumerable != current.Enumerable {
+		return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
+	}
+
+	// Generic descriptor (no value/writable/get/set) - allowed on non-configurable
+	isGenericDesc := !desc.IsAccessor && !desc.HasValue && !desc.HasWritable
+
+	if !isGenericDesc {
+		// If changing between accessor and data descriptor types (step 9)
+		if desc.IsAccessor != current.IsAccessor {
+			// Changing data to accessor or accessor to data on non-configurable
+			if desc.IsAccessor || (desc.HasValue || desc.HasWritable) {
+				return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
+			}
+		}
+
+		if current.IsAccessor && desc.IsAccessor {
+			// For accessor properties: can't change get or set on non-configurable (step 11)
+			if desc.HasGet && desc.Getter != current.Getter {
+				return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
+			}
+			if desc.HasSet && desc.Setter != current.Setter {
+				return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
+			}
+		} else if !current.IsAccessor && !desc.IsAccessor {
+			// For data properties (step 10)
+			if !current.Writable {
+				// Can't change writable from false to true on non-configurable
+				if desc.HasWritable && desc.Writable {
+					return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
+				}
+				// Can't change value on non-writable non-configurable
+				if desc.HasValue && !sameValue(desc.Value, current.Value) {
+					return fmt.Errorf("TypeError: Cannot redefine property: %s", name)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func propertyToDescriptor(prop *runtime.Property) *runtime.Value {
@@ -469,11 +669,18 @@ func propertyToDescriptor(prop *runtime.Property) *runtime.Value {
 	return runtime.NewObject(desc)
 }
 
-func definePropertiesFromDescriptors(obj *runtime.Object, descs *runtime.Object) {
+func definePropertiesFromDescriptors(obj *runtime.Object, descs *runtime.Object) error {
 	for k, p := range descs.Properties {
 		if p.Enumerable && p.Value != nil && p.Value.Type == runtime.TypeObject {
-			prop := descriptorToProperty(p.Value.Object)
-			obj.DefineProperty(k, prop)
+			prop, err := descriptorToProperty(p.Value.Object)
+			if err != nil {
+				return err
+			}
+			if err := validateDefineOwnProperty(obj, k, prop); err != nil {
+				return err
+			}
+			mergeAndDefineProperty(obj, k, prop)
 		}
 	}
+	return nil
 }
