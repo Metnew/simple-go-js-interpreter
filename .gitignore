@@ -1,4 +1,5 @@
-jsgo
+/jsgo
+/test262runner
 *.exe
 test262/
 vendor/

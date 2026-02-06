@@ -60,6 +60,11 @@ func (interp *Interpreter) RegisterNative(name string, fn runtime.CallableFunc) 
 	interp.natives[name] = fn
 }
 
+// GlobalEnv returns the interpreter's global environment for builtin registration.
+func (interp *Interpreter) GlobalEnv() *runtime.Environment {
+	return interp.global
+}
+
 // Eval parses and evaluates a JS source string.
 func (interp *Interpreter) Eval(source string) (*runtime.Value, error) {
 	p := parser.New(source)
@@ -68,7 +73,7 @@ func (interp *Interpreter) Eval(source string) (*runtime.Value, error) {
 		return nil, fmt.Errorf("parse errors: %v", errs)
 	}
 
-	env := runtime.NewEnvironment(nil, false)
+	env := runtime.NewEnvironment(interp.global, false)
 
 	// register natives
 	for name, fn := range interp.natives {
