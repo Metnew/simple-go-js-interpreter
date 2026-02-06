@@ -22,7 +22,6 @@ func createRegExpConstructor(objProto *runtime.Object) (*runtime.Object, *runtim
 
 	ctor := newFuncObject("RegExp", 2, regexpConstructorCall)
 	ctor.Constructor = regexpConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)

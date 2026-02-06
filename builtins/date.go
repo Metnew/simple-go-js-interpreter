@@ -61,7 +61,6 @@ func createDateConstructor(objProto *runtime.Object) (*runtime.Object, *runtime.
 	// Constructor: Date() as function returns string, new Date() creates object
 	ctor := newFuncObject("Date", 7, dateCall)
 	ctor.Constructor = dateConstruct
-	ctor.Prototype = proto
 
 	// Static methods
 	setMethod(ctor, "now", 0, dateNow)

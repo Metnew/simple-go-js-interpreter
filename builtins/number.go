@@ -22,7 +22,6 @@ func createNumberConstructor(objProto *runtime.Object) (*runtime.Object, *runtim
 
 	ctor := newFuncObject("Number", 1, numberConstructorCall)
 	ctor.Constructor = numberConstructorCall
-	ctor.Prototype = proto
 
 	setMethod(ctor, "isInteger", 1, numberIsInteger)
 	setMethod(ctor, "isFinite", 1, numberIsFinite)

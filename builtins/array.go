@@ -49,7 +49,6 @@ func createArrayConstructor(objProto *runtime.Object) (*runtime.Object, *runtime
 
 	ctor := newFuncObject("Array", 1, arrayConstructorCall)
 	ctor.Constructor = arrayConstructorCall
-	ctor.Prototype = proto
 
 	setMethod(ctor, "isArray", 1, arrayIsArray)
 	setMethod(ctor, "from", 1, arrayFrom)

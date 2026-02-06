@@ -36,7 +36,6 @@ func createMapConstructor(objProto *runtime.Object) (*runtime.Object, *runtime.O
 
 	ctor := newFuncObject("Map", 0, mapConstructorCall)
 	ctor.Constructor = mapConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)
@@ -244,7 +243,6 @@ func createSetConstructor(objProto *runtime.Object) (*runtime.Object, *runtime.O
 
 	ctor := newFuncObject("Set", 0, setConstructorCall)
 	ctor.Constructor = setConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)
@@ -411,7 +409,6 @@ func createWeakMapConstructor(objProto *runtime.Object) *runtime.Object {
 
 	ctor := newFuncObject("WeakMap", 0, weakMapConstructorCall)
 	ctor.Constructor = weakMapConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)
@@ -501,7 +498,6 @@ func createWeakSetConstructor(objProto *runtime.Object) *runtime.Object {
 
 	ctor := newFuncObject("WeakSet", 0, weakSetConstructorCall)
 	ctor.Constructor = weakSetConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)

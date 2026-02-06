@@ -15,7 +15,6 @@ func createBooleanConstructor(objProto *runtime.Object) (*runtime.Object, *runti
 
 	ctor := newFuncObject("Boolean", 1, booleanConstructorCall)
 	ctor.Constructor = booleanConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)

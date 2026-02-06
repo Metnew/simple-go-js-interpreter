@@ -19,7 +19,6 @@ func createErrorConstructor(objProto *runtime.Object) *runtime.Object {
 
 	ctor := newFuncObject("Error", 1, errorConstructorCall)
 	ctor.Constructor = errorConstructorCall
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)
@@ -37,7 +36,6 @@ func createErrorSubtype(name string, objProto *runtime.Object, errProto *runtime
 		return makeErrorValue(name, args, proto), nil
 	})
 	ctor.Constructor = ctor.Callable
-	ctor.Prototype = proto
 
 	setDataProp(ctor, "prototype", runtime.NewObject(proto), false, false, false)
 	setDataProp(proto, "constructor", runtime.NewObject(ctor), true, false, true)

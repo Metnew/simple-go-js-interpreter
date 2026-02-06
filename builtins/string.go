@@ -45,7 +45,6 @@ func createStringConstructor(objProto *runtime.Object) (*runtime.Object, *runtim
 
 	ctor := newFuncObject("String", 1, stringConstructorCall)
 	ctor.Constructor = stringConstructorCall
-	ctor.Prototype = proto
 
 	setMethod(ctor, "fromCharCode", 1, stringFromCharCode)
 	setMethod(ctor, "fromCodePoint", 1, stringFromCodePoint)

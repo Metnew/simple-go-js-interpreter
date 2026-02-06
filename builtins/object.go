@@ -23,7 +23,6 @@ func createObjectConstructor() (*runtime.Object, *runtime.Object) {
 	// Object constructor
 	ctor := newFuncObject("Object", 1, objectConstructorCall)
 	ctor.Constructor = objectConstructorCall
-	ctor.Prototype = proto
 
 	setMethod(ctor, "keys", 1, objectKeys)
 	setMethod(ctor, "values", 1, objectValues)

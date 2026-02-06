@@ -25,7 +25,6 @@ func createPromiseConstructor(objProto *runtime.Object) (*runtime.Object, *runti
 
 	ctor := newFuncObject("Promise", 1, promiseConstructorCall)
 	ctor.Constructor = promiseConstructorCall
-	ctor.Prototype = proto
 
 	setMethod(ctor, "resolve", 1, promiseResolve)
 	setMethod(ctor, "reject", 1, promiseReject)
