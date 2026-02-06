@@ -245,3 +245,45 @@ go test ./...
 11. Implement Proxy traps or remove Proxy support
 12. Implement proper weak references for WeakMap/WeakSet (requires finalizers or epoch-based approach)
 13. Add microtask queue for Promise async semantics
+
+## Exploit PoCs
+
+The `exploits/` directory contains proof-of-concept scripts demonstrating the security findings above. All were tested against the built binary.
+
+### Information Disclosure
+
+| File | Description | Impact |
+|------|-------------|--------|
+| `heap_addr_leak.js` | Leaks Go heap addresses via `Symbol.Key()` using `Object.getOwnPropertyNames()`. Extracts 12+ heap pointers per run, shows 24-byte allocation stride. | Defeats ASLR if combined with memory corruption primitive |
+| `leak_survey.js` | Surveys all info leak surfaces: error stacks, `Function.toString`, regex errors, builtin property enumeration. Finds `RegExp.prototype` leaks well-known symbol addresses with zero interaction. | Engine fingerprinting, heap layout mapping |
+| `leak_deep.js` | Deep dive into 5 confirmed findings: well-known symbol address leak, Go regexp engine fingerprinting, WeakMap memory leak (10k entries ~1MB never freed), prototype pollution backdoor, `Object.freeze` bypass. | Multiple primitives chained |
+
+### Denial of Service
+
+| File | Description | Impact |
+|------|-------------|--------|
+| `dos_crash.js` | Prototype cycle via `Object.setPrototypeOf(a,b); Object.setPrototypeOf(b,a)`. Property access on cyclic chain causes infinite loop, eventually 1GB stack overflow. Crash dumps Go runtime state including heap addresses and source paths. | Process crash with Go runtime info leak |
+
+### Memory Read Attempts
+
+| File | Description | Result |
+|------|-------------|--------|
+| `memread_attempt1.js` | String OOB via integer overflow (substring, slice, charCodeAt, codePointAt), array sparse access for uninitialized data, `String.fromCharCode` edge cases. | **Blocked** -- Go bounds-checks all access, zeroes memory |
+| `memread_attempt2.js` | `int(Infinity)` UB in `copyWithin` (triggers Go panic with heap addresses in stack trace), `Array.fill` with Infinity, recursive stack overflow, `toString`/`valueOf` override type confusion, null byte in property names. | **Partial** -- crashes leak Go stack with heap pointers, but no content read |
+| `memread_attempt3.js` | ObjType confusion via `__proto__` swap, ArrayData/length property desync, `valueOf` shapeshifter returning different types on successive calls, RegExp `lastIndex` manipulation, accessor property on array indices. | **Blocked** -- engine checks `len(ArrayData)` not property, `valueOf` evaluated before builtin sees args |
+| `memread_attempt4.js` | Trigger `unsupported statement: %T` for Go type leak, constructor confusion, iterator protocol abuse, JSON.stringify with symbol keys (confirmed: serializes `@@sym(desc)@0xADDR` into JSON output), prototype spy getters. | **Partial** -- JSON.stringify leaks symbol keys with heap addresses |
+| `memread_attempt5.js` | Global API enumeration (78 properties, no file I/O), `Function` constructor execution, hidden native method probing, ArrayData cap-vs-len after pop/push, `lastIndexOf` OOB crash (confirmed: panics at `s[:pos+len(search)]`). | **Blocked** -- Go's memory safety model prevents all OOB reads |
+
+### Conclusion
+
+Go's memory safety model (bounds-checked slices/strings, zero-initialized allocations, GC preventing UAF, no `unsafe` package) prevents true arbitrary memory reads. The best achievable primitives are:
+
+1. **Heap address leak** via `Symbol.Key()` (`%p` format embeds Go pointer in property key)
+2. **Heap address leak** via error messages for failed Symbol method calls
+3. **Heap address leak** via `JSON.stringify` serializing symbol keys
+4. **Heap address + source path leak** via Go panic stack traces
+5. **Heap layout mapping** (24-byte allocation stride = Go size class for Symbol structs)
+6. **Go engine fingerprinting** (regexp error messages reveal RE2, `%g` number formatting)
+7. **Multiple DoS primitives** (prototype cycles, stack overflow, OOB crashes)
+
+For a true memory read, you'd need `unsafe.Pointer` in the Go codebase (none), a Go compiler/runtime bug, or CGo interop (none).

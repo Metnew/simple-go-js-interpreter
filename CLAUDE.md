@@ -52,5 +52,16 @@ JS regex features unsupported by Go's `regexp` package are handled in `jsRegexpT
 ### Annex B Compatibility
 Block-scoped function declarations are hoisted per Annex B.3.3. The hoisting respects lexical bindings in enclosing blocks, catch parameters, and the `arguments` name.
 
+## Security Research
+
+The `exploits/` directory contains PoC scripts. The `security_report.md` has detailed builtin-level findings. Key attack surfaces:
+
+- **Symbol.Key() info leak**: `fmt.Sprintf("@@sym(%s)@%p", ...)` embeds heap pointers in property keys. Observable via `getOwnPropertyNames`, error messages, and `JSON.stringify`.
+- **Go panic stack traces**: `copyWithin` with `1e18` index and `lastIndexOf` OOB both crash the CLI (no `recover()`), dumping heap addresses and source paths.
+- **Prototype chain cycles**: No cycle detection in `Object.setPrototypeOf` → infinite loop → stack overflow → crash with Go runtime info.
+- **Object.freeze bypass**: `Set()` never checks frozen/sealed/extensibility flags.
+- **WeakMap strong refs**: `map[*Object]*Value` prevents GC, causing unbounded memory growth.
+- **Go memory safety**: Prevents true memory reads — all slice/string access is bounds-checked, allocations zero-initialized, no `unsafe` package.
+
 ## Not Yet Implemented
 Generators, async/await, ES modules, TypedArrays, SharedArrayBuffer, Intl, Temporal, regexp lookbehind/named groups/Unicode property escapes.
