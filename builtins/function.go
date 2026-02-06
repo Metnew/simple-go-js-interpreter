@@ -38,7 +38,10 @@ func functionCall(this *runtime.Value, args []*runtime.Value) (*runtime.Value, e
 		return nil, fmt.Errorf("TypeError: not a function")
 	}
 	thisArg := argAt(args, 0)
-	callArgs := args[1:]
+	var callArgs []*runtime.Value
+	if len(args) > 1 {
+		callArgs = args[1:]
+	}
 	return fn(thisArg, callArgs)
 }
 
@@ -50,8 +53,24 @@ func functionApply(this *runtime.Value, args []*runtime.Value) (*runtime.Value, 
 	thisArg := argAt(args, 0)
 	var callArgs []*runtime.Value
 	if len(args) > 1 && args[1].Type == runtime.TypeObject && args[1].Object != nil {
-		if args[1].Object.OType == runtime.ObjTypeArray {
-			callArgs = args[1].Object.ArrayData
+		obj := args[1].Object
+		if obj.OType == runtime.ObjTypeArray {
+			callArgs = obj.ArrayData
+		} else {
+			// Handle array-like objects (e.g., arguments object)
+			lengthVal := obj.Get("length")
+			if lengthVal != runtime.Undefined {
+				length := int(lengthVal.ToNumber())
+				callArgs = make([]*runtime.Value, length)
+				for i := 0; i < length; i++ {
+					v := obj.Get(fmt.Sprintf("%d", i))
+					if v != nil {
+						callArgs[i] = v
+					} else {
+						callArgs[i] = runtime.Undefined
+					}
+				}
+			}
 		}
 	}
 	return fn(thisArg, callArgs)

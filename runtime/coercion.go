@@ -103,8 +103,20 @@ func NewArrayObject(proto *Object, elements []*Value) *Object {
 	return obj
 }
 
+// DefaultFunctionPrototype is set by builtins.RegisterAll so that all
+// subsequently created function objects inherit Function.prototype methods
+// (call, apply, bind, etc.).
+var DefaultFunctionPrototype *Object
+
+// DefaultObjectPrototype is set by builtins.RegisterAll so that newly created
+// ordinary objects (e.g., function .prototype properties) inherit from Object.prototype.
+var DefaultObjectPrototype *Object
+
 // NewFunctionObject creates a function object.
 func NewFunctionObject(proto *Object, callable CallableFunc) *Object {
+	if proto == nil {
+		proto = DefaultFunctionPrototype
+	}
 	return &Object{
 		OType:      ObjTypeFunction,
 		Properties: make(map[string]*Property),

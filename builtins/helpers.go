@@ -9,6 +9,7 @@ func newFuncObject(name string, length int, fn runtime.CallableFunc) *runtime.Ob
 		OType:      runtime.ObjTypeFunction,
 		Properties: make(map[string]*runtime.Property),
 		Callable:   fn,
+		Prototype:  FunctionPrototype, // may be nil during early init, fixed by SetFunctionPrototype
 	}
 	obj.Set("name", runtime.NewString(name))
 	obj.DefineProperty("length", &runtime.Property{
@@ -18,6 +19,25 @@ func newFuncObject(name string, length int, fn runtime.CallableFunc) *runtime.Ob
 		Configurable: true,
 	})
 	return obj
+}
+
+// setFuncPrototypeRecursive walks an object's own properties and sets Prototype
+// on any function objects that have nil Prototype. Called after FunctionPrototype is created.
+func setFuncPrototypeRecursive(obj *runtime.Object) {
+	if obj == nil {
+		return
+	}
+	if obj.OType == runtime.ObjTypeFunction && obj.Prototype == nil {
+		obj.Prototype = FunctionPrototype
+	}
+	for _, p := range obj.Properties {
+		if p.Value != nil && p.Value.Type == runtime.TypeObject && p.Value.Object != nil {
+			inner := p.Value.Object
+			if inner.OType == runtime.ObjTypeFunction && inner.Prototype == nil {
+				inner.Prototype = FunctionPrototype
+			}
+		}
+	}
 }
 
 func setMethod(obj *runtime.Object, name string, length int, fn runtime.CallableFunc) {
