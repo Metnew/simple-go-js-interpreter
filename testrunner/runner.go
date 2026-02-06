@@ -171,6 +171,11 @@ func runSingleTest(path, rel, baseHarness, harnessDir string) TestResult {
 
 	resultCh := make(chan evalResult, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- evalResult{val: nil, err: fmt.Errorf("panic: %v", r)}
+			}
+		}()
 		val, err := interp.Eval(fullSource)
 		resultCh <- evalResult{val: val, err: err}
 	}()
